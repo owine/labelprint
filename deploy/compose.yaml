@@ -1,0 +1,44 @@
+# Example stack: labelprint behind Traefik with an auth middleware.
+# Copy it into your compose setup and adjust LPRINT_URI, the Host rule and the
+# middleware. labelprint has no login of its own — keep the auth middleware.
+services:
+  labelprint:
+    # Pin a release as X.Y.Z@sha256:… (see the GitHub releases).
+    image: ghcr.io/owine/labelprint:latest
+    container_name: labelprint
+    hostname: labelprint
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      # uploaded pdfs and their rendered pages, briefly
+      - /tmp:size=128m
+    mem_limit: 512m
+    environment:
+      TZ: ${TZ}
+      # Required: the queue as LPrint shows it. If LPrint runs on the Docker
+      # host, use the host's LAN address (or see the README for host-gateway).
+      LPRINT_URI: "ipp://lprint-host.lan:8000/ipp/print/Zebra-GK420t"
+      # Optional: label jobs with the user your auth proxy names, if it always
+      # sets this header (Authelia: Remote-User).
+      # USER_HEADER: "Remote-User"
+    networks:
+      - proxy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/labelprint", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.labelprint.rule: "Host(`labelprint.${DOMAIN}`)"
+      traefik.http.routers.labelprint.middlewares: "authelia@file"
+      traefik.http.services.labelprint.loadbalancer.server.port: "8080"
+
+networks:
+  proxy:
+    external: true

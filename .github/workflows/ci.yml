@@ -1,0 +1,400 @@
+---
+name: CI
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never cancel a main run part-way: publish-image tags what it pushed.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt needed on: $unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: hadolint
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387  # v3.5.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: warning
+
+      - name: yamllint
+        run: yamllint .github/ deploy/
+
+      - name: actionlint
+        uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7  # v2.2.0
+        with:
+          fail-on-error: true
+
+  test:
+    name: go test
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      # The PDF tests shell out to pdfinfo/pdftoppm and skip without them.
+      - name: Install poppler
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends poppler-utils
+
+      - name: Test
+        run: go test -race -count=1 ./...
+
+  docker-build:
+    name: docker build (${{ matrix.platform }})
+    # Builds PR code, so it holds no token that can write packages; pushing is
+    # push-image's job. Each arch builds and is smoke-tested natively, so the
+    # arm64 image is exercised on arm64 hardware before it ships.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # Renovate's built-in github-actions manager can't see these labels
+        # (it reads the literal `runs-on:`, which here is an expression); the
+        # `github-runners` customManager in owine/renovate-config tracks them.
+        # Keep the shape: one line per label, `runner: <os>-<version>`, suffix
+        # attached (`26.04-arm` is its own version in that datasource).
+        include:
+          - runner: ubuntu-26.04
+            platform: linux/amd64
+          - runner: ubuntu-26.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    outputs:
+      # Identical on both legs unless the arches' apk indexes disagree, in
+      # which case either value still keys a rebuild correctly.
+      apk-closure: ${{ steps.apk.outputs.key }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
+      # Cache key for the runtime `apk add` layer (see APK_CLOSURE in the
+      # Dockerfile): a hash of the package set that command resolves to today
+      # on this leg's arch, so the layer rebuilds when a transitive package
+      # gets a new build. Pins are read from the Dockerfile, so Renovate bumps
+      # carry through.
+      - name: Compute apk closure cache key
+        id: apk
+        run: |
+          base=$(awk '/^FROM /{img=$2} END{print img}' Dockerfile)
+          pkgs=$(awk '/^FROM /{n=0; on=0}
+                      /apk add/{on=1}
+                      on{for(i=1;i<=NF;i++){if($i=="&&"){on=0;break} if($i~/^[a-z0-9][a-z0-9._+-]*=/)p[++n]=$i}}
+                      END{for(i=1;i<=n;i++)print p[i]}' Dockerfile)
+          if [ -z "$base" ] || [ -z "$pkgs" ]; then
+            echo "::error::Could not read the runtime base image or apk pins from Dockerfile"
+            exit 1
+          fi
+          # shellcheck disable=SC2086 # word-split the pin list on purpose
+          closure=$(docker run --rm "$base" apk add --simulate --no-cache $pkgs \
+            | sed -nE 's/^\( *[0-9]+\/[0-9]+\) (Installing|Upgrading) //p' | sort)
+          echo "$closure"
+          echo "key=$(printf '%s\n' "$closure" | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Build ${{ matrix.platform }}
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: labelprint:ci
+          build-args: APK_CLOSURE=${{ steps.apk.outputs.key }}
+          cache-from: type=gha,scope=docker-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=docker-${{ matrix.platform }}
+
+      - name: Smoke test (hardened like production)
+        run: |
+          echo "== no LPRINT_URI: refuses to start"
+          if docker run --rm labelprint:ci 2>/dev/null; then
+            echo "::error::started without LPRINT_URI"
+            exit 1
+          fi
+
+          docker run -d --name lp --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true --tmpfs /tmp:size=64m \
+            -e LPRINT_URI=ipp://127.0.0.1:1/ipp/print/none \
+            -p 8080:8080 labelprint:ci
+          for _ in $(seq 1 30); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' lp)" = healthy ] && break
+            sleep 2
+          done
+          docker inspect -f 'health: {{.State.Health.Status}}' lp
+          [ "$(docker inspect -f '{{.State.Health.Status}}' lp)" = healthy ]
+
+          echo "== non-root"
+          [ "$(docker exec lp id -u)" != 0 ]
+
+          echo "== Helvetica has a stand-in (carrier PDFs rarely embed it)"
+          docker exec lp fc-match Helvetica | tee /dev/stderr | grep -q Liberation
+
+          echo "== pdf renders inside the container"
+          curl -fsS -F file=@testdata/label-2page.pdf http://localhost:8080/api/preview \
+            | jq -e '.kind == "pdf" and .pageCount == 2 and (.pages | length) == 2' >/dev/null
+
+          echo "== zpl renders inside the container (zebrash, embedded fonts)"
+          curl -fsS -F file=@testdata/sample.zpl http://localhost:8080/api/preview \
+            | jq -e '.kind == "zpl" and .labels == 1 and (.pages | length) == 1 and .previewError == null' >/dev/null
+
+          echo "== lprint down is reported, not fatal"
+          curl -fsS http://localhost:8080/api/printer | jq -e '.reachable == false and (.error | length) > 0' >/dev/null
+
+          echo "== cross-site posts are refused"
+          code=$(curl -s -o /dev/null -w '%{http_code}' -H 'Sec-Fetch-Site: cross-site' \
+            -F file=@testdata/label-2page.pdf http://localhost:8080/api/print)
+          [ "$code" = 403 ]
+
+          echo "== csp header"
+          curl -fsSI http://localhost:8080/ | grep -qi "content-security-policy: default-src 'self'"
+
+      - name: Container logs
+        if: always()
+        run: docker logs lp || true
+
+      # The gate: nothing with a fixable HIGH/CRITICAL is ever pushed.
+      # code-scanning (below) uploads the full report for main.
+      - name: Trivy gate on HIGH/CRITICAL
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: labelprint:ci
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+
+  push-image:
+    name: push image (${{ matrix.platform }})
+    # main only, after lint, tests and both arches' smoke tests passed. Each
+    # arch pushes untagged, by digest; publish-image joins them into one
+    # multi-arch manifest and tags it. Rebuilding from the cache docker-build
+    # just wrote (same build args) is cache hits plus an upload.
+    needs: [lint, test, docker-build]
+    if: github.ref == 'refs/heads/main'
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        # Same shape as docker-build's matrix (see the comment there).
+        include:
+          - runner: ubuntu-26.04
+            platform: linux/amd64
+          - runner: ubuntu-26.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push ${{ matrix.platform }} by digest
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          build-args: APK_CLOSURE=${{ needs.docker-build.outputs.apk-closure }}
+          cache-from: type=gha,scope=docker-${{ matrix.platform }}
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: digest-${{ strategy.job-index }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+  publish-image:
+    name: publish image
+    needs: push-image
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    # One publish at a time, so the head check and the tagging it guards
+    # can't interleave with another run's.
+    concurrency:
+      group: publish-image
+      cancel-in-progress: false
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6  # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check this commit is still main's head
+        id: head
+        # Runs finish out of order: an older commit's run that ends after a
+        # newer one has published must not move `main` back. It still gets
+        # its sha tag.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head=$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github.sha" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/commits/main")
+          if [ "$head" = "$GITHUB_SHA" ]; then
+            echo "main=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::main is now at ${head}; tagging sha only, not main"
+            echo "main=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute tags
+        id: tags
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          # sha-<long> pins a commit's image and is what release.yml retags;
+          # `latest` and X.Y.Z / X.Y / X are set only by release.yml.
+          tags: |
+            type=sha,format=long
+            type=raw,value=main,enable=${{ steps.head.outputs.main == 'true' }}
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        env:
+          METADATA_JSON: ${{ steps.tags.outputs.json }}
+        run: |
+          tags=()
+          while IFS= read -r tag; do
+            tags+=(-t "$tag")
+          done < <(jq -r '.tags[]' <<< "$METADATA_JSON")
+          images=()
+          for digest in *; do
+            images+=("${IMAGE}@sha256:$digest")
+          done
+          docker buildx imagetools create "${tags[@]}" "${images[@]}"
+
+      - name: Inspect image
+        run: docker buildx imagetools inspect "${IMAGE}:sha-${GITHUB_SHA}"
+
+  code-scanning:
+    name: code scanning
+    # Full Trivy report (every severity) into the Security tab for what main
+    # published. Report only: the gate in docker-build already blocked
+    # anything fixable at HIGH/CRITICAL before it was pushed.
+    needs: publish-image
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Trivy (SARIF)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25  # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}:sha-${{ github.sha }}
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: '0'
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370  # v4.39.1
+        with:
+          sarif_file: trivy-results.sarif
+
+  # Stable-named aggregator so a branch ruleset can require one check.
+  # Treats skipped as success: PRs skip the push/publish/scan jobs.
+  ci-pass:
+    needs: [lint, test, docker-build, push-image, publish-image, code-scanning]
+    if: always()
+    runs-on: ubuntu-26.04
+    steps:
+      - name: All required jobs passed or were appropriately skipped
+        env:
+          NEEDS_RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "$NEEDS_RESULTS" | jq -c .
+          if echo "$NEEDS_RESULTS" | jq -e 'any(.[]; . != "success" and . != "skipped")' >/dev/null; then
+            echo "::error::One or more required jobs did not succeed or skip."
+            exit 1
+          fi

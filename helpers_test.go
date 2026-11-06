@@ -1,0 +1,97 @@
+package main
+
+import (
+	"bytes"
+	"encoding/binary"
+	"fmt"
+	"os"
+	"testing"
+)
+
+// makeLabelPDF builds a small 4×6 in PDF with n pages. Each page has a border,
+// barcode-ish bars and a line of Helvetica that is deliberately NOT embedded,
+// as in many carrier label PDFs, so rendering it exercises font substitution.
+func makeLabelPDF(n int) []byte {
+	var objs []string
+	// 1 catalog, 2 pages, 3 font, then (page, content) pairs.
+	kids := ""
+	for i := range n {
+		kids += fmt.Sprintf("%d 0 R ", 4+2*i)
+	}
+	objs = append(objs,
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", kids, n),
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+	)
+	for i := range n {
+		var c bytes.Buffer
+		c.WriteString("4 w 12 12 264 408 re S\n") // border
+		for b := range 24 {                       // bars of varying width
+			fmt.Fprintf(&c, "%d 60 %d 90 re f\n", 36+b*9, 1+b%4)
+		}
+		fmt.Fprintf(&c, "BT /F1 28 Tf 36 360 Td (labelprint page %d) Tj ET\n", i+1)
+		stream := c.String()
+		objs = append(objs,
+			fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 288 432] "+
+				"/Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>", 5+2*i),
+			fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(stream), stream),
+		)
+	}
+	var out bytes.Buffer
+	out.WriteString("%PDF-1.4\n")
+	offsets := make([]int, len(objs))
+	for i, o := range objs {
+		offsets[i] = out.Len()
+		fmt.Fprintf(&out, "%d 0 obj\n%s\nendobj\n", i+1, o)
+	}
+	xref := out.Len()
+	fmt.Fprintf(&out, "xref\n0 %d\n0000000000 65535 f \n", len(objs)+1)
+	for _, off := range offsets {
+		fmt.Fprintf(&out, "%010d 00000 n \n", off)
+	}
+	fmt.Fprintf(&out, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objs)+1, xref)
+	return out.Bytes()
+}
+
+// The CI image smoke test posts testdata/label-2page.pdf; keep it in sync with
+// the generator. Regenerate with UPDATE_FIXTURES=1 go test -run Fixture.
+func TestFixtureUpToDate(t *testing.T) {
+	want := makeLabelPDF(2)
+	const path = "testdata/label-2page.pdf"
+	if os.Getenv("UPDATE_FIXTURES") == "1" {
+		if err := os.WriteFile(path, want, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("%s is stale; run UPDATE_FIXTURES=1 go test -run Fixture", path)
+	}
+}
+
+// ---------------------------------------------------------------- response builder for fakes
+
+type ippResponseBuilder struct{ ippEncoder }
+
+func newIPPResponse(status uint16, requestID uint32) *ippResponseBuilder {
+	b := &ippResponseBuilder{}
+	b.buf.Write([]byte{2, 0})
+	_ = binary.Write(&b.buf, binary.BigEndian, status)
+	_ = binary.Write(&b.buf, binary.BigEndian, requestID)
+	b.group(tagOperationGroup)
+	b.str(tagCharset, "attributes-charset", "utf-8")
+	b.str(tagLanguage, "attributes-natural-language", "en")
+	return b
+}
+
+func (b *ippResponseBuilder) mustBytes(t testing.TB) []byte {
+	t.Helper()
+	out, err := b.bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}

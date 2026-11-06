@@ -1,0 +1,295 @@
+/* =============================================================
+   owine design system — tokens.css (from the owine design system's colors_and_type.css)
+   load this on every page. all tokens live here.
+   ============================================================= */
+
+/* fonts are vendored (latin subsets from google fonts, OFL) so the page makes
+   no third-party requests — the csp is default-src 'self'. */
+@font-face { font-family: 'Geist'; font-style: normal; font-weight: 100 900; font-display: swap;
+  src: url('fonts/geist-latin.woff2') format('woff2'); }
+@font-face { font-family: 'Geist Mono'; font-style: normal; font-weight: 100 900; font-display: swap;
+  src: url('fonts/geist-mono-latin.woff2') format('woff2'); }
+@font-face { font-family: 'Instrument Serif'; font-style: italic; font-weight: 400; font-display: swap;
+  src: url('fonts/instrument-serif-italic-latin.woff2') format('woff2'); }
+
+:root {
+  /* ---------- color: warm paper + cool ink ---------- */
+  --paper:        #f6f4ef;  /* base canvas — warm off-white */
+  --paper-2:      #efece4;  /* subtle surface tint */
+  --paper-3:      #e6e2d8;  /* deeper recess */
+  --card:         #fbfaf6;  /* card surface, lifted from paper */
+  --line:         #dcd6cc;  /* hairlines, dividers, borders */
+  --line-strong:  #948b78;  /* control borders (≥3:1 for 1.4.11), focus rings on warm */
+
+  --ink:          #0e1620;  /* primary text — cool near-black */
+  --ink-2:        #2c3a4d;  /* secondary text */
+  --ink-3:        #5b6878;  /* tertiary, captions, muted */
+  --ink-4:        #5b6673;  /* muted meta text, placeholder, disabled — AA on paper/paper-2/paper-3 */
+
+  /* foreground/background aliases used in components */
+  --fg-1: var(--ink);
+  --fg-2: var(--ink-2);
+  --fg-3: var(--ink-3);
+  --fg-4: var(--ink-4);
+  --bg-1: var(--paper);
+  --bg-2: var(--paper-2);
+  --bg-3: var(--paper-3);
+
+  /* ---------- accent: one cool blue ---------- */
+  --accent:        #2b5fd9;
+  --accent-hover:  #234fb8;
+  --accent-press:  #1c4096;
+  --accent-soft:   #e4ecfb;  /* tinted bg for highlights */
+  --accent-ink:    #14306e;  /* readable text on accent-soft */
+  --on-accent:     #fff;     /* text/icons on solid accent (AA per theme) */
+
+  /* ---------- semantic (text-safe: AA on paper AND on their -soft tint) ---------- */
+  --success:      #2e7659;
+  --success-soft: #e1eee7;
+  --warning:      #905d14;
+  --warning-soft: #f3e7cf;
+  --danger:       #b4382b;
+  --danger-soft:  #f3dcd8;
+
+  /* ---------- dark surface (used sparingly, e.g. terminals, code) ---------- */
+  --ink-bg:       #11161d;
+  --ink-bg-2:     #1a212b;
+  --ink-line:     #2a3340;
+  --ink-fg:       #e8ebf0;
+  --ink-fg-2:     #a5adb8;
+
+  /* ---------- typography ---------- */
+  --font-sans:    'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono:    'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  --font-serif:   'Instrument Serif', ui-serif, Georgia, serif;
+
+  /* type scale — modest, editorial */
+  --fs-12: 0.75rem;   /* 12 — micro labels */
+  --fs-13: 0.8125rem; /* 13 — caption */
+  --fs-14: 0.875rem;  /* 14 — small body, UI */
+  --fs-15: 0.9375rem; /* 15 — UI default */
+  --fs-16: 1rem;      /* 16 — body */
+  --fs-18: 1.125rem;  /* 18 — large body */
+  --fs-20: 1.25rem;   /* 20 — small head */
+  --fs-24: 1.5rem;    /* 24 — h4 */
+  --fs-30: 1.875rem;  /* 30 — h3 */
+  --fs-36: 2.25rem;   /* 36 — h2 */
+  --fs-48: 3rem;      /* 48 — h1 */
+  --fs-64: 4rem;      /* 64 — display */
+  --fs-80: 5rem;      /* 80 — hero display */
+
+  --lh-tight: 1.1;
+  --lh-snug:  1.25;
+  --lh-base:  1.5;
+  --lh-loose: 1.7;
+
+  --tracking-tight:  -0.02em;
+  --tracking-normal: 0;
+  --tracking-wide:   0.02em;
+  --tracking-caps:   0.08em;
+
+  /* ---------- spacing (4px grid) ---------- */
+  --sp-1:  4px;
+  --sp-2:  8px;
+  --sp-3:  12px;
+  --sp-4:  16px;
+  --sp-5:  20px;
+  --sp-6:  24px;
+  --sp-8:  32px;
+  --sp-10: 40px;
+  --sp-12: 48px;
+  --sp-16: 64px;
+  --sp-20: 80px;
+  --sp-24: 96px;
+  --sp-32: 128px;
+
+  /* ---------- radii ---------- */
+  --r-1: 4px;    /* tags, inline pills */
+  --r-2: 6px;    /* inputs, small buttons */
+  --r-3: 10px;   /* cards, larger buttons */
+  --r-4: 16px;   /* media, big cards */
+  --r-full: 999px;
+
+  /* ---------- shadows — soft, low, warm ---------- */
+  --shadow-1: 0 1px 0 rgb(14 22 32 / 0.04), 0 1px 2px rgb(14 22 32 / 0.04);
+  --shadow-2: 0 1px 0 rgb(14 22 32 / 0.04), 0 4px 12px rgb(14 22 32 / 0.06);
+  --shadow-3: 0 2px 0 rgb(14 22 32 / 0.04), 0 12px 32px rgb(14 22 32 / 0.10);
+  --shadow-inset: inset 0 1px 0 rgb(255 255 255 / 0.6), inset 0 -1px 0 rgb(14 22 32 / 0.04);
+
+  /* sticky header bg (paper-tinted, blurred) — flips per theme */
+  --sticky: rgb(246 244 239 / 0.85);
+
+  /* focus ring — cool blue, generous */
+  --ring: 0 0 0 3px rgb(43 95 217 / 0.25);
+
+  /* ---------- motion ---------- */
+  --ease-out:    cubic-bezier(0.2, 0.7, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.6, 0, 0.2, 1);
+  --dur-fast:    120ms;
+  --dur-base:    200ms;
+  --dur-slow:    360ms;
+}
+
+/* =============================================================
+   dark theme — opt in via <html data-theme="dark"> or .dark
+   inverts paper/ink, keeps the same brand DNA (warm-tinted dark)
+   ============================================================= */
+
+:root[data-theme="dark"],
+.dark {
+  /* surfaces — slightly warm-tinted dark, not pure black */
+  --paper:        #14181f;  /* base canvas */
+  --paper-2:      #1a1f27;  /* subtle surface tint */
+  --paper-3:      #232934;  /* deeper recess */
+  --card:         #1b212a;  /* card surface, lifted */
+  --line:         #2a323f;  /* hairlines, dividers */
+  --line-strong:  #3d4654;  /* heavier borders */
+
+  /* text — warm off-whites, scaling down */
+  --ink:          #f1eee8;  /* primary text */
+  --ink-2:        #c4c8d0;  /* secondary */
+  --ink-3:        #8a929d;  /* tertiary */
+  --ink-4:        #8391a1;  /* muted meta text, placeholder, disabled — AA on paper/card/paper-3 */
+
+  /* fg/bg aliases pick up the new values automatically via var() */
+  --fg-1: var(--ink);
+  --fg-2: var(--ink-2);
+  --fg-3: var(--ink-3);
+  --fg-4: var(--ink-4);
+  --bg-1: var(--paper);
+  --bg-2: var(--paper-2);
+  --bg-3: var(--paper-3);
+
+  /* accent — brighter blue so it pops on dark (AA on paper + card) */
+  --accent:        #6b8eeb;
+  --accent-hover:  #88a4ef;
+  --accent-press:  #5a82e8;
+  --accent-soft:   #1d2c4d;  /* dark soft tint */
+  --accent-ink:    #b8c9f4;  /* readable text on accent-soft */
+  --on-accent:     #14181f;  /* dark text on bright accent — AA on solid buttons */
+
+  /* semantic — muted dark tints */
+  --success:      #5fb88f;
+  --success-soft: #18302a;
+  --warning:      #d9a14e;
+  --warning-soft: #382812;
+  --danger:       #e07262;
+  --danger-soft:  #3a1d18;
+
+  /* dark surfaces (code/terminal) — stay even darker than the base */
+  --ink-bg:       #0c1015;
+  --ink-bg-2:     #14181f;
+  --ink-line:     #2a323f;
+  --ink-fg:       #e8ebf0;
+  --ink-fg-2:     #a5adb8;
+
+  /* shadows — softer, leaning on inner contrast and borders.
+     dark mode picks up almost no light shadow; we mostly rely on borders. */
+  --shadow-1: 0 1px 0 rgb(0 0 0 / 0.20), 0 1px 2px rgb(0 0 0 / 0.20);
+  --shadow-2: 0 1px 0 rgb(0 0 0 / 0.20), 0 4px 12px rgb(0 0 0 / 0.30);
+  --shadow-3: 0 2px 0 rgb(0 0 0 / 0.20), 0 12px 32px rgb(0 0 0 / 0.45);
+  --shadow-inset: inset 0 1px 0 rgb(255 255 255 / 0.04), inset 0 -1px 0 rgb(0 0 0 / 0.3);
+
+  /* sticky header bg — dark paper at 85% */
+  --sticky: rgb(20 24 31 / 0.85);
+
+  /* focus ring tuned for dark — brighter accent at higher alpha */
+  --ring: 0 0 0 3px rgb(90 130 232 / 0.35);
+}
+
+/* a smooth flip when toggling (only on root, not every element) */
+html { color-scheme: light; transition: background-color 200ms var(--ease-out); }
+html[data-theme="dark"] { color-scheme: dark; }
+
+/* =============================================================
+   semantic element styles — opt-in via .prose or by tag
+   ============================================================= */
+
+html, body {
+  font-family: var(--font-sans);
+  font-size: var(--fs-16);
+  line-height: var(--lh-base);
+  color: var(--fg-1);
+  background: var(--bg-1);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1, h2, h3, h4, h5, h6 {
+  font-family: var(--font-sans);
+  font-weight: 500;
+  line-height: var(--lh-tight);
+  letter-spacing: var(--tracking-tight);
+  color: var(--fg-1);
+  margin: 0;
+}
+h1 { font-size: var(--fs-48); font-weight: 500; }
+h2 { font-size: var(--fs-36); font-weight: 500; }
+h3 { font-size: var(--fs-24); font-weight: 500; }
+h4 { font-size: var(--fs-20); font-weight: 500; }
+h5 { font-size: var(--fs-16); font-weight: 600; }
+h6 { font-size: var(--fs-14); font-weight: 600; letter-spacing: var(--tracking-caps); text-transform: uppercase; color: var(--fg-3); }
+
+p {
+  font-size: var(--fs-16);
+  line-height: var(--lh-base);
+  color: var(--fg-2);
+  margin: 0;
+  text-wrap: pretty;
+}
+
+code, kbd, samp, pre {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+code:not(pre code) {
+  background: var(--paper-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  padding: 0.08em 0.35em;
+  font-size: 0.88em;
+}
+
+pre {
+  background: var(--ink-bg);
+  color: var(--ink-fg);
+  padding: var(--sp-4);
+  border-radius: var(--r-3);
+  overflow-x: auto;
+  font-size: var(--fs-13);
+  line-height: var(--lh-base);
+}
+pre code { background: transparent; border: 0; padding: 0; color: inherit; }
+
+a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+  text-decoration-color: color-mix(in oklab, var(--accent) 40%, transparent);
+  transition: color var(--dur-fast) var(--ease-out), text-decoration-color var(--dur-fast) var(--ease-out);
+}
+a:hover { color: var(--accent-hover); text-decoration-color: currentColor; }
+
+hr { border: 0; border-top: 1px solid var(--line); margin: var(--sp-8) 0; }
+
+/* utility — the "display serif" moment */
+.display-serif {
+  font-family: var(--font-serif);
+  font-weight: 400;
+  font-style: italic;
+  letter-spacing: 0;
+}
+
+/* utility — mono micro-label, used a lot */
+.label-mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+  color: var(--fg-3);
+}
+
+/* utility — caption */
+.caption { font-size: var(--fs-13); color: var(--fg-3); line-height: var(--lh-snug); }

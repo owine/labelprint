@@ -1,0 +1,456 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"image/png"
+	"io"
+	"log/slog"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"os/exec"
+	"strings"
+	"sync"
+	"testing"
+)
+
+// fakeLPrint answers the three operations the app uses and records every
+// request it gets, decoded.
+type fakeLPrint struct {
+	t        *testing.T
+	mu       sync.Mutex
+	requests []*ippMessage
+	nextJob  int
+	// printStatus, if set, fails Print-Job with that status and message.
+	printStatus  uint16
+	printMessage string
+	reasons      []string
+}
+
+func (f *fakeLPrint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	if r.Header.Get("Content-Type") != "application/ipp" {
+		f.t.Errorf("content-type = %q", r.Header.Get("Content-Type"))
+	}
+	m, err := parseIPP(body)
+	if err != nil {
+		f.t.Errorf("fake lprint got an unparseable request: %v", err)
+		w.WriteHeader(400)
+		return
+	}
+	f.mu.Lock()
+	f.requests = append(f.requests, m)
+	f.mu.Unlock()
+
+	var resp *ippResponseBuilder
+	switch m.Code {
+	case opGetPrinterAttributes:
+		resp = newIPPResponse(0, m.RequestID)
+		resp.group(tagPrinterGroup)
+		resp.integer(tagEnum, "printer-state", 3)
+		resp.str(tagText, "printer-state-message", "Idle.")
+		reasons := f.reasons
+		if len(reasons) == 0 {
+			reasons = []string{"none"}
+		}
+		resp.strs(tagKeyword, "printer-state-reasons", reasons...)
+		resp.strs(tagKeyword, "media-supported", "oe_2x1-label_2x1in", "na_index-4x6_4x6in", "roll_max_4x39.6in")
+		resp.strs(tagKeyword, "media-ready", "na_index-4x6_4x6in")
+		resp.str(tagKeyword, "media-default", "na_index-4x6_4x6in")
+	case opPrintJob:
+		if f.printStatus != 0 {
+			resp = newIPPResponse(f.printStatus, m.RequestID)
+			resp.str(tagText, "status-message", f.printMessage)
+			break
+		}
+		f.mu.Lock()
+		f.nextJob++
+		id := f.nextJob
+		f.mu.Unlock()
+		resp = newIPPResponse(0, m.RequestID)
+		resp.group(tagJobGroup)
+		resp.integer(tagInteger, "job-id", int32(id))
+		resp.integer(tagEnum, "job-state", 3)
+		resp.str(tagKeyword, "job-state-reasons", "job-incoming")
+	case opGetJobs:
+		resp = newIPPResponse(0, m.RequestID)
+		for id, st := range []int32{9, 8} {
+			resp.group(tagJobGroup)
+			resp.integer(tagInteger, "job-id", int32(id+1))
+			resp.str(tagName, "job-name", "label.pdf")
+			resp.integer(tagEnum, "job-state", st)
+			resp.str(tagText, "job-state-message", "Unable to connect to printer.")
+		}
+	default:
+		resp = newIPPResponse(0x0501, m.RequestID)
+	}
+	w.Header().Set("Content-Type", "application/ipp")
+	_, _ = w.Write(resp.mustBytes(f.t))
+}
+
+func (f *fakeLPrint) printJobs() []*ippMessage {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*ippMessage
+	for _, m := range f.requests {
+		if m.Code == opPrintJob {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func newTestServer(t *testing.T, mutate ...func(*config)) (*fakeLPrint, http.Handler) {
+	t.Helper()
+	fake := &fakeLPrint{t: t}
+	lp := httptest.NewServer(fake)
+	t.Cleanup(lp.Close)
+	cfg := config{
+		LPrintURI:    "ipp" + strings.TrimPrefix(lp.URL, "http") + "/ipp/print/Zebra-GK420t",
+		MaxUpload:    20 << 20,
+		MaxPages:     50,
+		MaxCopies:    100,
+		DefaultMedia: "na_index-4x6_4x6in",
+		DPI:          203,
+		UserHeader:   "Remote-User",
+	}
+	for _, m := range mutate {
+		m(&cfg)
+	}
+	ipp, err := newIPPClient(cfg.LPrintURI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &server{cfg: cfg, ipp: ipp, pdf: newPDFRenderer(cfg.DPI), zpl: newZPLRenderer(cfg.DPI), log: slog.New(slog.DiscardHandler)}
+	return fake, s.routes()
+}
+
+func multipartBody(t *testing.T, filename string, data []byte, fields map[string]string) (*bytes.Buffer, string) {
+	t.Helper()
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	for k, v := range fields {
+		_ = mw.WriteField(k, v)
+	}
+	fw, _ := mw.CreateFormFile("file", filename)
+	_, _ = fw.Write(data)
+	_ = mw.Close()
+	return &buf, mw.FormDataContentType()
+}
+
+func post(t *testing.T, h http.Handler, path, filename string, data []byte, fields map[string]string) (*httptest.ResponseRecorder, map[string]any) {
+	t.Helper()
+	body, ct := multipartBody(t, filename, data, fields)
+	req := httptest.NewRequest(http.MethodPost, path, body)
+	req.Header.Set("Content-Type", ct)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("Remote-User", "alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var out map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec, out
+}
+
+func jobAttr(m *ippMessage, name string) *ippAttr { return m.group(tagJobGroup).get(name) }
+func opAttr(m *ippMessage, name string) *ippAttr  { return m.group(tagOperationGroup).get(name) }
+
+func requirePoppler(t *testing.T) {
+	t.Helper()
+	for _, tool := range []string{"pdfinfo", "pdftoppm"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not installed (poppler-utils)", tool)
+		}
+	}
+}
+
+// ---------------------------------------------------------------- print
+
+func TestPrintZPLRepeatsForCopies(t *testing.T) {
+	fake, h := newTestServer(t)
+	zpl := []byte("^XA^FO50,50^ADN,36,20^FDhello^FS^XZ")
+	rec, out := post(t, h, "/api/print", "ship.zpl", zpl, map[string]string{"copies": "3", "media": "oe_2x1-label_2x1in"})
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	jobs := fake.printJobs()
+	if len(jobs) != 1 {
+		t.Fatalf("%d Print-Jobs, want 1", len(jobs))
+	}
+	m := jobs[0]
+	if got := opAttr(m, "document-format").str(); got != "application/vnd.zebra-zpl" {
+		t.Errorf("document-format = %q", got)
+	}
+	if got := opAttr(m, "requesting-user-name").str(); got != "alice" {
+		t.Errorf("user = %q", got)
+	}
+	if got := opAttr(m, "job-name").str(); got != "ship.zpl ×3" {
+		t.Errorf("job-name = %q", got)
+	}
+	if want := strings.Repeat(string(zpl)+"\n", 3); string(m.Data) != want {
+		t.Errorf("document = %q", m.Data)
+	}
+	// LPrint ignores both for raw ZPL; sending them would only mislead.
+	if g := m.group(tagJobGroup); g != nil && (g.get("copies") != nil || g.get("media") != nil) {
+		t.Errorf("unexpected job attributes on a ZPL job: %+v", g.Attrs)
+	}
+	if n := len(out["jobs"].([]any)); n != 1 {
+		t.Errorf("response lists %d jobs", n)
+	}
+}
+
+func TestPrintPNG(t *testing.T) {
+	fake, h := newTestServer(t)
+	img := []byte("\x89PNG\r\n\x1a\n-not-really-but-sniffed")
+	rec, _ := post(t, h, "/api/print", "label.png", img, map[string]string{"copies": "2", "media": "na_index-4x6_4x6in"})
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	m := fake.printJobs()[0]
+	checks := map[string]string{
+		"document-format": opAttr(m, "document-format").str(),
+		"media":           jobAttr(m, "media").str(),
+		"print-scaling":   jobAttr(m, "print-scaling").str(),
+	}
+	want := map[string]string{"document-format": "image/png", "media": "na_index-4x6_4x6in", "print-scaling": "fit"}
+	for k, v := range want {
+		if checks[k] != v {
+			t.Errorf("%s = %q, want %q", k, checks[k], v)
+		}
+	}
+	if got := jobAttr(m, "copies").int(); got != 2 {
+		t.Errorf("copies = %d", got)
+	}
+	if !bytes.Equal(m.Data, img) {
+		t.Error("png must be sent unchanged")
+	}
+}
+
+func TestPrintPDFOneJobPerPage(t *testing.T) {
+	requirePoppler(t)
+	fake, h := newTestServer(t)
+	rec, out := post(t, h, "/api/print", "carrier.pdf", makeLabelPDF(3), map[string]string{"pages": "1,3"})
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	jobs := fake.printJobs()
+	if len(jobs) != 2 {
+		t.Fatalf("%d Print-Jobs, want 2", len(jobs))
+	}
+	for i, wantName := range []string{"carrier.pdf · p1/3", "carrier.pdf · p3/3"} {
+		m := jobs[i]
+		if got := opAttr(m, "job-name").str(); got != wantName {
+			t.Errorf("job-name = %q, want %q", got, wantName)
+		}
+		if got := opAttr(m, "document-format").str(); got != "image/png" {
+			t.Errorf("document-format = %q", got)
+		}
+		if got := jobAttr(m, "media").str(); got != "na_index-4x6_4x6in" {
+			t.Errorf("media = %q (default should apply)", got)
+		}
+		img, err := png.Decode(bytes.NewReader(m.Data))
+		if err != nil {
+			t.Fatalf("page %d isn't a png: %v", i, err)
+		}
+		// 4×6 in at 203 dpi
+		if b := img.Bounds(); b.Dx() != 812 || b.Dy() != 1218 {
+			t.Errorf("page %d is %dx%d, want 812x1218", i, b.Dx(), b.Dy())
+		}
+	}
+	if n := len(out["jobs"].([]any)); n != 2 {
+		t.Errorf("response lists %d jobs", n)
+	}
+}
+
+func TestPrintPDFRespectsPageLimit(t *testing.T) {
+	requirePoppler(t)
+	fake, h := newTestServer(t, func(c *config) { c.MaxPages = 2 })
+	rec, out := post(t, h, "/api/print", "big.pdf", makeLabelPDF(3), nil)
+	if rec.Code != 400 || !strings.Contains(out["error"].(string), "limit is 2") {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if len(fake.printJobs()) != 0 {
+		t.Fatal("nothing should be sent")
+	}
+}
+
+func TestPrintRejects(t *testing.T) {
+	cases := []struct {
+		name     string
+		file     string
+		data     []byte
+		fields   map[string]string
+		maxBytes int64
+		status   int
+	}{
+		{"gif", "x.gif", []byte("GIF89a......"), nil, 0, 415},
+		{"plain text", "notes.txt", []byte("hello"), nil, 0, 415},
+		{"too big", "big.zpl", bytes.Repeat([]byte("^XA^XZ"), 400), nil, 1024, 413},
+		{"copies 0", "a.zpl", []byte("^XA^XZ"), map[string]string{"copies": "0"}, 0, 400},
+		{"copies junk", "a.zpl", []byte("^XA^XZ"), map[string]string{"copies": "2x"}, 0, 400},
+		{"bad media", "a.png", []byte("\x89PNG\r\n\x1a\n"), map[string]string{"media": "Letter; rm -rf"}, 0, 400},
+		{"empty", "a.zpl", nil, nil, 0, 400},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fake, h := newTestServer(t, func(cfg *config) {
+				if c.maxBytes > 0 {
+					cfg.MaxUpload = c.maxBytes
+				}
+			})
+			rec, out := post(t, h, "/api/print", c.file, c.data, c.fields)
+			if rec.Code != c.status {
+				t.Fatalf("status %d, want %d: %s", rec.Code, c.status, rec.Body)
+			}
+			if out["error"] == "" {
+				t.Error("no error message")
+			}
+			if len(fake.printJobs()) != 0 {
+				t.Error("a rejected upload reached lprint")
+			}
+		})
+	}
+}
+
+func TestPrintShowsLPrintError(t *testing.T) {
+	fake, h := newTestServer(t)
+	fake.printStatus, fake.printMessage = 0x040A, "Unsupported format 'image/png'."
+	rec, out := post(t, h, "/api/print", "a.png", []byte("\x89PNG\r\n\x1a\n"), nil)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if msg := out["error"].(string); !strings.Contains(msg, "document-format-not-supported") || !strings.Contains(msg, "Unsupported format") {
+		t.Fatalf("error = %q", msg)
+	}
+}
+
+func TestPrintWarnsAboutPrinterState(t *testing.T) {
+	fake, h := newTestServer(t)
+	fake.reasons = []string{"media-empty-error", "offline-report"}
+	rec, out := post(t, h, "/api/print", "a.zpl", []byte("^XA^XZ"), nil)
+	if rec.Code != 200 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	w, _ := json.Marshal(out["warnings"])
+	if !strings.Contains(string(w), "media-empty-error") || !strings.Contains(string(w), "offline-report") {
+		t.Fatalf("warnings = %s", w)
+	}
+}
+
+func TestPrintWhenLPrintDown(t *testing.T) {
+	_, h := newTestServer(t, func(c *config) { c.LPrintURI = "ipp://127.0.0.1:1/ipp/print/x" })
+	rec, out := post(t, h, "/api/print", "a.zpl", []byte("^XA^XZ"), nil)
+	if rec.Code != http.StatusBadGateway || !strings.Contains(out["error"].(string), "can't reach lprint at 127.0.0.1:1") {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestCrossSitePostRejected(t *testing.T) {
+	fake, h := newTestServer(t)
+	body, ct := multipartBody(t, "a.zpl", []byte("^XA^XZ"), nil)
+	req := httptest.NewRequest(http.MethodPost, "/api/print", body)
+	req.Header.Set("Content-Type", ct)
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if len(fake.printJobs()) != 0 {
+		t.Fatal("cross-site request printed")
+	}
+}
+
+// ---------------------------------------------------------------- preview, printer, jobs, static
+
+func TestPreviewPDF(t *testing.T) {
+	requirePoppler(t)
+	fake, h := newTestServer(t)
+	rec, out := post(t, h, "/api/preview", "x.pdf", makeLabelPDF(2), nil)
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if out["kind"] != "pdf" || out["pageCount"] != 2.0 || out["selected"] != 2.0 {
+		t.Fatalf("got %v", out)
+	}
+	pages := out["pages"].([]any)
+	if len(pages) != 2 || !strings.HasPrefix(pages[0].(map[string]any)["image"].(string), "data:image/png;base64,") {
+		t.Fatalf("pages = %v", pages)
+	}
+	if len(fake.printJobs()) != 0 {
+		t.Fatal("preview printed")
+	}
+
+	rec, out = post(t, h, "/api/preview", "x.pdf", makeLabelPDF(2), map[string]string{"pages": "3"})
+	if rec.Code != 400 || !strings.Contains(out["error"].(string), "outside") {
+		t.Fatalf("bad range: status %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestPreviewRejectsBrokenPDF(t *testing.T) {
+	requirePoppler(t)
+	_, h := newTestServer(t)
+	rec, out := post(t, h, "/api/preview", "x.pdf", []byte("%PDF-1.4\ngarbage"), nil)
+	if rec.Code != 400 || !strings.Contains(out["error"].(string), "couldn't read that pdf") {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestPrinterEndpoint(t *testing.T) {
+	_, h := newTestServer(t)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/printer", nil))
+	var p printerResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
+		t.Fatal(err)
+	}
+	if !p.Reachable || p.State != "idle" || p.Queue != "Zebra-GK420t" || len(p.Reasons) != 0 {
+		t.Fatalf("got %+v", p)
+	}
+	if len(p.Media) != 2 || p.Media[1].Name != "na_index-4x6_4x6in" || !p.Media[1].Ready {
+		t.Fatalf("media = %+v", p.Media)
+	}
+}
+
+func TestPrinterEndpointWhenDown(t *testing.T) {
+	_, h := newTestServer(t, func(c *config) { c.LPrintURI = "ipp://127.0.0.1:1/ipp/print/x" })
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/printer", nil))
+	var p printerResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &p)
+	if rec.Code != 200 || p.Reachable || p.Error == "" || len(p.Media) != 1 {
+		t.Fatalf("status %d: %+v", rec.Code, p)
+	}
+}
+
+func TestJobsEndpoint(t *testing.T) {
+	fake, h := newTestServer(t)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/jobs", nil))
+	var out struct{ Jobs []jobInfo }
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Jobs) != 2 || out.Jobs[0].State != "completed" || out.Jobs[1].State != "aborted" {
+		t.Fatalf("jobs = %+v", out.Jobs)
+	}
+	req := fake.requests[0]
+	if got := opAttr(req, "which-jobs").str(); got != "all" {
+		t.Errorf("which-jobs = %q", got)
+	}
+}
+
+func TestStaticAndHeaders(t *testing.T) {
+	_, h := newTestServer(t)
+	for _, path := range []string{"/", "/app.js", "/app.css", "/tokens.css", "/fonts/geist-latin.woff2", "/healthz"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != 200 {
+			t.Errorf("%s: %d", path, rec.Code)
+		}
+		if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'self'") {
+			t.Errorf("%s: csp = %q", path, csp)
+		}
+	}
+}

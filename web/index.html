@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>labelprint</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <!-- sets data-theme before css applies, so dark mode doesn't flash white -->
+  <script src="theme.js"></script>
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="app.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="wrap top-inner">
+      <a class="wordmark" href="/">labelprint</a>
+      <div class="printer" id="printer" aria-live="polite">
+        <span class="printer-dot" id="printer-dot" aria-hidden="true"></span>
+        <span class="mono" id="printer-name">checking lprint…</span>
+        <span id="printer-badges" class="printer-badges"></span>
+      </div>
+      <button class="btn btn-ghost btn-icon" id="theme" type="button" aria-label="toggle dark mode">
+        <svg class="icon-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="intro">
+      <h1>print a <span class="display-serif">label</span></h1>
+      <p>zpl, pdf, png or jpeg, up to <span id="max-mb">20</span> MB. previews are drawn right here — zpl and pdfs
+        alike — then everything goes to lprint over ipp. nothing leaves the house.</p>
+    </section>
+
+    <form id="form" class="card sheet" novalidate>
+      <div class="drop" id="drop">
+        <input type="file" id="file" name="file" class="visually-hidden"
+               accept=".zpl,.txt,.pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg,text/plain">
+        <label for="file" class="drop-target">
+          <svg class="drop-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/></svg>
+          <span class="drop-title">drop a file here, or <span class="link">choose one</span></span>
+          <span class="label-mono">zpl · pdf · png · jpeg</span>
+        </label>
+      </div>
+
+      <div class="file-row" id="file-row" hidden>
+        <span class="badge badge-accent" id="file-kind">pdf</span>
+        <span class="file-name" id="file-name"></span>
+        <span class="mono muted" id="file-size"></span>
+        <button class="btn btn-ghost btn-sm" type="button" id="clear">remove</button>
+      </div>
+
+      <div class="fields">
+        <div class="field field-copies">
+          <label for="copies">copies</label>
+          <input id="copies" name="copies" type="number" min="1" max="100" value="1" inputmode="numeric" required>
+        </div>
+        <div class="field field-media">
+          <label for="media">label size</label>
+          <select id="media" name="media"></select>
+          <p class="hint" id="media-hint"></p>
+        </div>
+        <div class="field field-pages" id="pages-field" hidden>
+          <label for="pages">pages</label>
+          <input id="pages" name="pages" type="text" placeholder="all" autocomplete="off" spellcheck="false"
+                 aria-describedby="pages-hint">
+          <p class="hint" id="pages-hint">e.g. 1-3, 5</p>
+        </div>
+      </div>
+
+      <div class="preview" id="preview" hidden>
+        <div class="caption-divider">preview</div>
+        <p class="caption" id="preview-note"></p>
+        <div class="preview-grid" id="preview-grid"></div>
+      </div>
+
+      <div class="actions">
+        <button class="btn btn-primary btn-lg" id="print" type="submit" disabled>print</button>
+        <span class="caption" id="summary">choose a file to start</span>
+      </div>
+
+      <div id="result" class="result" role="status" aria-live="polite" hidden></div>
+    </form>
+
+    <section class="jobs" aria-labelledby="jobs-title">
+      <div class="jobs-head">
+        <h2 id="jobs-title">recent jobs</h2>
+        <span class="label-mono" id="jobs-updated"></span>
+      </div>
+      <div class="card table-wrap">
+        <table>
+          <thead><tr><th scope="col">job</th><th scope="col">name</th><th scope="col">state</th><th scope="col">when</th></tr></thead>
+          <tbody id="jobs-body"><tr><td colspan="4" class="muted">loading…</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

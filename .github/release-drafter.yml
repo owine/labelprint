@@ -1,0 +1,8 @@
+_extends: owine/renovate-config:/release-drafter.yml
+footer: |
+
+  ### Use this release
+
+  ```sh
+  docker pull ghcr.io/owine/labelprint:$RESOLVED_VERSION
+  ```

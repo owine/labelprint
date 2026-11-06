@@ -1,0 +1,16 @@
+# Superpowers specs and plans (local-only design docs)
+docs/superpowers/
+docs/plans/
+.superpowers/
+
+# local tooling
+.claude/
+.playwright-mcp/
+.DS_Store
+
+# go build output
+/labelprint
+
+# real labels have names and addresses in them — never commit samples
+*.zpl
+!testdata/*.zpl

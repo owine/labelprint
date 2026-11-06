@@ -1,0 +1,12 @@
+.git
+.github
+.playwright-mcp
+.claude
+*.md
+*_test.go
+testdata
+deploy
+Dockerfile
+.dockerignore
+.gitignore
+.yamllint
