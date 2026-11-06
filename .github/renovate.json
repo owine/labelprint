@@ -3,11 +3,9 @@
   "extends": [
     "github>owine/renovate-config",
     "github>owine/renovate-config:automerge",
+    "github>owine/renovate-config:go",
     "github>owine/renovate-config:docker",
     "github>owine/renovate-config:alpine"
-  ],
-  "postUpdateOptions": [
-    "gomodTidy"
   ],
   "docker-compose": {
     "description": "deploy/compose.yaml is an example for readers, not a deployed stack, so it keeps the floating `latest` tag and Renovate leaves it alone (a deployment pins its own digest). Scoped under the docker-compose manager rather than set at top level: a top-level ignorePaths REPLACES the list inherited from :ignoreModulesAndTests instead of merging with it",
@@ -24,28 +22,6 @@
       "registryUrls": [
         "https://dl-cdn.alpinelinux.org/alpine?branch=v3.24&components=main,community&arch=x86_64"
       ]
-    },
-    {
-      "description": "Keep the Go toolchain in step: the golang build image (Dockerfile) and the `go` directive in go.mod (which CI's setup-go reads) move together in one PR, so CI never tests on a different Go than the image is built with.",
-      "matchPackageNames": [
-        "golang",
-        "go"
-      ],
-      "matchDatasources": [
-        "docker",
-        "golang-version"
-      ],
-      "groupName": "go toolchain"
-    },
-    {
-      "description": "Renovate skips indirect Go modules by default, but that's where the CVEs land here: zebrash pins golang.org/x/image and x/text, and the Trivy gate failed on both (CVE-2026-46603, CVE-2026-56851/56852). Requiring newer versions in go.mod overrides zebrash's floor (minimal version selection), so keep them updated like direct deps.",
-      "matchManagers": [
-        "gomod"
-      ],
-      "matchDepTypes": [
-        "indirect"
-      ],
-      "enabled": true
     }
   ]
 }
