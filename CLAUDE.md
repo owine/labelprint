@@ -87,4 +87,6 @@ The shared `go` preset owns the Go rules, so none live here: `go mod tidy` on ev
 tracked (that's where zebrash's CVEs land), `golang.org/x/*` as one group, and one `go toolchain` PR for the golang
 image and go.mod's `go` directive, so CI and the image use the same Go. The `go` directive now actually bumps; under the
 fleet's `rangeStrategy: pin` it never did. Go patches automerge; a Go minor (1.27 -> 1.28) opens as a manual-review PR
-with a 7-day soak. `deploy/compose.yaml` is an example and is ignored, so it keeps the floating `latest` tag.
+with a 7-day soak. While that minor PR is open no Go patch PR opens, because the shared preset always targets the newest
+release. The image then misses the security releases Go ships for the previous minor, so merge the minor soon after
+reviewing it. `deploy/compose.yaml` is an example and is ignored, so it keeps the floating `latest` tag.
