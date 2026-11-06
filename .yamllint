@@ -5,6 +5,12 @@ rules:
   line-length:
     max: 120
     level: warning
+    # release.yml is a verbatim fleet copy of owine/doc-scanner's (long
+    # `gh api` URLs and ::error:: messages included). Kept byte-identical so
+    # it can be re-synced with a plain copy; wrapping it here would make
+    # every sync a merge. Everything else still gets the 120-column check.
+    ignore: |
+      .github/workflows/release.yml
   comments:
     min-spaces-from-content: 1
   document-start: disable
