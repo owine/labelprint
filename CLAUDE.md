@@ -79,8 +79,12 @@ release notes and version bump. PRs are squash-merged.
 
 ## Dependency management
 
-Renovate extends the `owine/renovate-config` presets (base, automerge, docker, alpine). The apk pins track the Alpine
-line set by `branch=v3.XX` in `.github/renovate.json`. When the Alpine base crosses a release line, bump the base tag
-and digest, every apk pin, and that `branch=` in one PR. Go modules are tidied on update (`gomodTidy`). The golang image and go.mod's `go` directive are grouped so CI
-and the image use the same Go. `deploy/compose.yaml` is an example and is ignored, so it keeps the
-floating `latest` tag.
+Renovate extends the `owine/renovate-config` presets (base, automerge, go, docker, alpine). The apk pins track the
+Alpine line set by `branch=v3.XX` in `.github/renovate.json`. When the Alpine base crosses a release line, bump the base
+tag and digest, every apk pin, and that `branch=` in one PR.
+
+The shared `go` preset owns the Go rules, so none live here: `go mod tidy` on every gomod update, indirect modules
+tracked (that's where zebrash's CVEs land), `golang.org/x/*` as one group, and one `go toolchain` PR for the golang
+image and go.mod's `go` directive, so CI and the image use the same Go. The `go` directive now actually bumps; under the
+fleet's `rangeStrategy: pin` it never did. Go patches automerge; a Go minor (1.27 -> 1.28) opens as a manual-review PR
+with a 7-day soak. `deploy/compose.yaml` is an example and is ignored, so it keeps the floating `latest` tag.
