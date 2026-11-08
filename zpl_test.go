@@ -118,6 +118,42 @@ func TestZPLRenderLimitsLabels(t *testing.T) {
 	}
 }
 
+// inkSpan is the width of the ink on row y: last dark column minus first.
+func inkSpan(img image.Image, y int) int {
+	b := img.Bounds()
+	first, last := -1, -1
+	for x := b.Min.X; x < b.Max.X; x++ {
+		if color.GrayModel.Convert(img.At(x, y)).(color.Gray).Y < 128 {
+			if first < 0 {
+				first = x
+			}
+			last = x
+		}
+	}
+	return last - first
+}
+
+// Carrier ZPL switches Code 128 to subset C with >5, which packs two digits a
+// symbol. ingridhq/zebrash ignored the switch and drew the digits in subset B
+// behind a junk symbol, so previews showed a different value from the print.
+// The same characters must come out narrower with the switch than without it.
+func TestZPLCode128SubsetCSwitch(t *testing.T) {
+	width := func(fd string) int {
+		zpl := []byte("^XA^FO20,20^BY2^BCN,100,N,N,N^FD" + fd + "^FS^XZ")
+		p, err := newZPLRenderer(203).render(context.Background(), zpl, size4x6, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return inkSpan(decodePNG(t, p.Pages[0].PNG), 70)
+	}
+	withC, allB := width(">:1Z12345E>50312345678"), width(">:1Z12345E0312345678")
+	// 10 digits: 5 symbols in C plus the switch, against 10 in B; 11 modules a
+	// symbol at 2 dots is 88 dots narrower.
+	if withC >= allB-40 {
+		t.Fatalf("with >5 the barcode is %d dots wide, all subset B is %d: >5 isn't switching to subset C", withC, allB)
+	}
+}
+
 // Malformed input must come back as a result or an error, never a panic or
 // a hang: zebrash has no recover of its own.
 func TestZPLRenderSurvivesGarbage(t *testing.T) {

@@ -88,7 +88,7 @@ Renovate extends the `owine/renovate-config` presets (base, automerge, go, docke
 Alpine line set by `branch=v3.XX` in `.github/renovate.json`. When the Alpine base crosses a release line, bump the base
 tag and digest, every apk pin, and that `branch=` in one PR.
 
-The shared `go` preset owns the Go rules, so only the zebrash one (below) lives here: `go mod tidy` on every gomod
+The shared `go` preset owns the Go rules; the only Go rule in this repo is the zebrash one (below). The preset gives: `go mod tidy` on every gomod
 update, indirect modules tracked (that's where zebrash's CVEs land), `golang.org/x/*` as one group, and one
 `go toolchain` PR for the golang image and go.mod's `go` directive, so CI and the image use the same Go. The `go`
 directive now actually bumps; under the fleet's `rangeStrategy: pin` it never did. Go patches automerge; a Go minor
@@ -97,6 +97,12 @@ the shared preset always targets the newest release. The image then misses the s
 previous minor, so merge the minor soon after reviewing it. `deploy/compose.yaml` is an example and is ignored, so it
 keeps the floating `latest` tag.
 
-The zebrash rule: `github.com/Gobbo89/zebrash` gets its own group, no automerge and a `needs-review` label.
+The zebrash rule: `github.com/Gobbo89/zebrash`, plus `github.com/ingridhq/gg` and `github.com/ingridhq/maxicode` (still
+pulled from the abandoned upstream org), get their own group, no automerge and a `needs-review` label.
 Vulnerability-fix PRs are the exception: the shared `vulnerabilityAlerts` config automerges them and is applied with
 `force`, which a packageRule can't override.
+
+Advisories don't follow the fork. The Go vulnerability database, GHSA and Trivy match by module path, so a CVE filed
+against `github.com/ingridhq/zebrash` won't flag `github.com/Gobbo89/zebrash`, although most of its code is the same.
+When reviewing a fork update, or every few months, check upstream's advisories
+(github.com/ingridhq/zebrash/security and the Go vuln DB entry for that path) by hand.
