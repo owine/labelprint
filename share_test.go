@@ -449,3 +449,17 @@ func TestManifestAndWorker(t *testing.T) {
 		}
 	}
 }
+
+// Held shares stay within a fixed memory budget whatever MAX_UPLOAD_MB is, but
+// always fit at least one upload.
+func TestShareStoreByteCap(t *testing.T) {
+	for _, c := range []struct{ upload, want int64 }{
+		{20 << 20, 80 << 20},   // the default: four full-size shares
+		{5 << 20, 80 << 20},    // small uploads: the item cap binds first
+		{200 << 20, 200 << 20}, // the largest MAX_UPLOAD_MB: one share, not 800 MB
+	} {
+		if got := newShareStore(c.upload).maxBytes; got != c.want {
+			t.Errorf("upload cap %d MB: store holds %d MB, want %d MB", c.upload>>20, got>>20, c.want>>20)
+		}
+	}
+}

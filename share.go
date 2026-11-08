@@ -53,12 +53,18 @@ type shareStore struct {
 	now      func() time.Time
 }
 
+// shareBudget is the memory held shares may use: four full-size uploads at
+// the default 20 MB cap. It's fixed rather than a multiple of MAX_UPLOAD_MB,
+// which goes up to 200 MB (4× that would outgrow a small container), but
+// never less than one upload, so any file that can be uploaded can be shared.
+const shareBudget = 80 << 20
+
 func newShareStore(maxUpload int64) *shareStore {
-	return &shareStore{ttl: shareTTL, maxItems: shareMaxItems, maxBytes: 4 * maxUpload, now: time.Now}
+	return &shareStore{ttl: shareTTL, maxItems: shareMaxItems, maxBytes: max(maxUpload, shareBudget), now: time.Now}
 }
 
-// Can't happen while maxBytes is a multiple of the upload cap, but put
-// shouldn't evict everything for a file that still won't fit.
+// Can't happen while maxBytes is at least the upload cap, but put shouldn't
+// evict everything for a file that still won't fit.
 var errShareTooBig = &userError{Status: http.StatusRequestEntityTooLarge, Msg: "that file is too big to share"}
 
 // put holds data (not a copy) and returns its token: 128 random bits, base32

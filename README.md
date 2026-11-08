@@ -78,7 +78,8 @@ labelprint. A share always lands on the preview: you check it and press print. N
 Both platforms use the same hand-off. The phone POSTs the file to `/share`, which checks it like an upload and holds
 it in memory under a one-time link (`/?share=<token>`). The page collects it from there and shows the preview. A
 shared file is never written to disk. It's dropped once the page has collected it, or after 10 minutes. labelprint
-holds at most 8 shares and 4× the upload cap in total, and drops the oldest share to make room.
+holds at most 8 shares and 80 MB in total (more only if `MAX_UPLOAD_MB` is higher, so one upload always fits), and
+drops the oldest share to make room.
 
 **Android (Chrome).** Open labelprint in Chrome and choose **Add to Home screen** (or **Install app**) from the menu.
 It needs HTTPS. The installed app then appears in the share sheet for PDFs, PNGs, JPEGs and `.zpl`/`.txt` files. The
