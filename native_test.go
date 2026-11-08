@@ -209,6 +209,29 @@ func TestNativeRefuses(t *testing.T) {
 		})
 	}
 	labelBox := func(pw, ph float64) box { return boxIn(pw, ph, 0.95, 0.95, 4.1, 6.1) }
+	// A corner of the old 32 px tile grid, which starts at the box's top-left
+	// in the check render (200 ppi here): a spot centred on it used to split
+	// into four tiles that each passed.
+	br := labelBox(8.5, 11).pixels(8.5*200, 11*200)
+	cx, cy := br.Min.X+4*32, br.Min.Y+4*32 // page pixels
+	mark := func(white bool) []byte {
+		var b pdfBuilder
+		p := b.page(letter, 0)
+		im := labelBitmap(800, 1200)
+		ix, iy := cx-200, cy-200 // the bitmap sits at 1 in: 200 px
+		if white {
+			im.fill(ix-10, iy-10, ix+10, iy+10) // ink for an 8 × 8 white box to hide
+		}
+		p.image(im, 1, 1, 4, 6, 0)
+		if white {
+			p.ops.WriteString("1 g\n")
+		}
+		p.fillRect(float64(cx-4)/200, float64(cy-4)/200, 8.0/200, 8.0/200)
+		p.ops.WriteString("0 g\n")
+		return b.bytes()
+	}
+	var blank pdfBuilder
+	blank.page(letter, 0).image(newBitmap(800, 1200), 1, 1, 4, 6, 0)
 	cases := []struct {
 		name, reason string
 		pdf          []byte
@@ -225,6 +248,9 @@ func TestNativeRefuses(t *testing.T) {
 		// white boxes hiding part of the bitmap, which passthrough would print
 		{"0.05 in white-out", "in one spot", whiteBox(3, 1.5, 0.05), labelBox},
 		{"0.2 in white-out", "in one spot", whiteBox(3, 1.5, 0.2), labelBox},
+		{"8 px mark on a grid corner", "in one spot", mark(false), labelBox},
+		{"8 px white-out on a grid corner", "in one spot", mark(true), labelBox},
+		{"blank image", "no ink", blank.bytes(), labelBox},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -302,7 +328,7 @@ func TestCompareRender(t *testing.T) {
 	if m := compareRender(ref, mirror(label), at); m.diff < 0.5 || m.refusal() == "" {
 		t.Errorf("mirrored: %+v", m)
 	}
-	if m := compareRender(newWhite(240, 340), newWhite(200, 300), at); !math.IsInf(m.diff, 1) || m.refusal() == "" {
+	if m := compareRender(newWhite(240, 340), newWhite(200, 300), at); !math.IsInf(m.diff, 1) || !strings.Contains(m.refusal(), "no ink") {
 		t.Errorf("empty: %+v", m)
 	}
 	// ink in the render 3 px outside where the crop sits

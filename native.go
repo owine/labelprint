@@ -20,8 +20,8 @@ const (
 	nativeTolerance = 0.10 // effective resolution vs the printer's, per axis
 	nativeMarginPx  = 4    // white kept around the crop's ink
 	verifyMaxDiff   = 0.03 // share of the union of ink that may differ
-	verifyTile      = 32   // px: misses are also counted per tile ...
-	verifyTileMax   = 16   // ... and no tile may have more
+	verifyCell      = 16   // px: misses are also counted per cell, and no 2 × 2 cells ...
+	verifyTileMax   = 16   // ... (a 32 px window, every 16 px) may have more
 	verifyStrayPx   = 2    // ink this far outside the crop's place still counts as the crop's
 )
 
@@ -75,6 +75,9 @@ func (d *pdfDoc) extractImages(ctx context.Context, page int) ([]pageImage, erro
 	imgs, err := parseHTMLImages(xml, d.geom(page), dir)
 	if err != nil {
 		return nil, err
+	}
+	if len(imgs) > maxPageImages { // the gate's promise, whatever pdftohtml made of the page
+		return nil, fmt.Errorf("%d images", len(imgs))
 	}
 	// pdftohtml copies DCT streams out unchanged, so a JPEG's own header can
 	// claim far more pixels than the dictionary the gate saw, and decoding it
@@ -233,7 +236,7 @@ func (d *pdfDoc) native(ctx context.Context, page int, b box, cv canvas) (g *ima
 			continue
 		}
 		bits := threshold(toGray(src), 128)
-		var refs [2]*image.Gray // the box rendered at the image's resolution, per turn parity
+		var refs [2]*image.Gray // the box rendered at the image's resolution, per turn parity, thresholded
 		for _, flip := range []bool{false, true} {
 			base := bits
 			if flip {
@@ -253,6 +256,7 @@ func (d *pdfDoc) native(ctx context.Context, page int, b box, cv canvas) (g *ima
 				).Intersect(o.Rect)
 				ink, ok := inkBounds(o, cr, 128)
 				if !ok {
+					reason = "the image has no ink in the box"
 					continue
 				}
 				cr = ink.Inset(-nativeMarginPx).Intersect(cr)
@@ -272,6 +276,7 @@ func (d *pdfDoc) native(ctx context.Context, page int, b box, cv canvas) (g *ima
 					if ref, err = d.renderBoxAt(ctx, page, b, ppiX, ppiY, true); err != nil {
 						return nil, 0, "the check render failed"
 					}
+					ref = threshold(ref, 128)
 					refs[turns%2] = ref
 				}
 				// The crop's top-left in ref. Poppler starts the image at the
@@ -299,7 +304,7 @@ func (d *pdfDoc) native(ctx context.Context, page int, b box, cv canvas) (g *ima
 				m := compareRender(ref.SubImage(cmp).(*image.Gray), crop, at)
 				d.r.log.Debug("passthrough check", "page", page, "turns", turns, "mirror", flip,
 					"differs", m.diff, "tile", m.tile, "stray", m.stray)
-				if m.diff < best {
+				if m.diff < best || math.IsInf(best, 1) {
 					best, reason = m.diff, m.refusal()
 				}
 				if m.refusal() == "" && m.diff < accepted {
@@ -315,13 +320,13 @@ func (d *pdfDoc) native(ctx context.Context, page int, b box, cv canvas) (g *ima
 }
 
 // renderMatch is how a crop, drawn where it sits, compares with the box's
-// render, both thresholded. A miss is an ink pixel (in either) with no ink
+// render. A miss is an ink pixel (in either) with no ink
 // within ±1 px in the other: poppler spreads bitmap edges by about half a
 // pixel, so exact-pixel and gray comparisons fail real matches, while a stamp,
 // extra text or a turned or mirrored placement still misses.
 type renderMatch struct {
 	diff  float64 // misses ÷ the union of ink; +Inf when neither has ink
-	tile  int     // the most misses in one verifyTile × verifyTile tile
+	tile  int     // the most misses in any 2 × 2 verifyCell window
 	stray bool    // the render has ink outside the crop's place (grown by verifyStrayPx)
 }
 
@@ -331,6 +336,8 @@ type renderMatch struct {
 // tile checks catch those.
 func (m renderMatch) refusal() string {
 	switch {
+	case math.IsInf(m.diff, 1):
+		return "the box has no ink"
 	case m.stray:
 		return "the box has ink beside the image"
 	case !(m.diff < verifyMaxDiff):
@@ -342,7 +349,13 @@ func (m renderMatch) refusal() string {
 }
 
 // compareRender draws crop 1:1 into a white copy of ref's frame with its
-// top-left at at, and compares the two. ref's origin must be 0,0.
+// top-left at at, and compares the two. Both must be thresholded (0 and 255
+// only), and ref's origin must be 0,0.
+//
+// Misses are counted per verifyCell cell, and m.tile is the worst 2 × 2 block
+// of cells: 32 px windows every 16 px, so any spot up to 17 px across lies
+// whole in one window wherever it falls, rather than splitting across a grid
+// corner into four tiles that each pass.
 func compareRender(ref, crop *image.Gray, at image.Point) renderMatch {
 	w, h := ref.Rect.Dx(), ref.Rect.Dy()
 	place := crop.Rect.Add(at)
@@ -352,7 +365,7 @@ func compareRender(ref, crop *image.Gray, at image.Point) renderMatch {
 		i := (y-at.Y)*crop.Stride + dst.Min.X - at.X
 		copy(cand.Pix[y*cand.Stride+dst.Min.X:], crop.Pix[i:i+dst.Dx()])
 	}
-	a, c := threshold(ref, 128), threshold(cand, 128)
+	a, c := ref, cand
 	own := place.Inset(-verifyStrayPx)
 	inkNear := func(g *image.Gray, x, y int) bool {
 		for dy := -1; dy <= 1; dy++ {
@@ -364,8 +377,8 @@ func compareRender(ref, crop *image.Gray, at image.Point) renderMatch {
 		}
 		return false
 	}
-	tw := (w + verifyTile - 1) / verifyTile
-	tiles := make([]int, tw*((h+verifyTile-1)/verifyTile))
+	cw, ch := (w+verifyCell-1)/verifyCell, (h+verifyCell-1)/verifyCell
+	cells := make([]int, cw*ch)
 	var m renderMatch
 	miss, union := 0, 0
 	for y := range h {
@@ -380,10 +393,19 @@ func compareRender(ref, crop *image.Gray, at image.Point) renderMatch {
 			union++
 			if (ia && !inkNear(c, x, y)) || (ic && !inkNear(a, x, y)) {
 				miss++
-				t := &tiles[(y/verifyTile)*tw+x/verifyTile]
-				*t++
-				m.tile = max(m.tile, *t)
+				cells[(y/verifyCell)*cw+x/verifyCell]++
 			}
+		}
+	}
+	cell := func(x, y int) int {
+		if x >= cw || y >= ch {
+			return 0
+		}
+		return cells[y*cw+x]
+	}
+	for y := range ch {
+		for x := range cw {
+			m.tile = max(m.tile, cell(x, y)+cell(x+1, y)+cell(x, y+1)+cell(x+1, y+1))
 		}
 	}
 	if union == 0 {
