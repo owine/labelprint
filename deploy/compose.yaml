@@ -21,7 +21,7 @@ services:
       TZ: ${TZ}
       # Required: the queue as LPrint shows it. If LPrint runs on the Docker
       # host, use the host's LAN address (or see the README for host-gateway).
-      LPRINT_URI: "ipp://lprint-host.lan:8000/ipp/print/Zebra-GK420t"
+      LPRINT_URI: "ipp://lprint-host.lan:8000/ipp/print/Zebra-GX420t"
       # Optional: label jobs with the user your auth proxy names, if it always
       # sets this header (Authelia: Remote-User).
       # USER_HEADER: "Remote-User"

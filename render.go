@@ -16,7 +16,7 @@ import (
 
 // pdfRenderer rasterises PDFs with poppler. Each page becomes an 8-bit
 // grayscale PNG at the printer's resolution, which LPrint then dithers to the
-// GK420t's 1-bit head. Anti-aliasing is off: smoothed edges would come out of
+// GX420t's 1-bit head. Anti-aliasing is off: smoothed edges would come out of
 // that dither as fuzzy barcode bars, while hard edges at 203 dpi map 1:1 to
 // printer dots.
 type pdfRenderer struct {

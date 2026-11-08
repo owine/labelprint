@@ -107,7 +107,7 @@ func newTestServer(t *testing.T, mutate ...func(*config)) (*fakeLPrint, http.Han
 	lp := httptest.NewServer(fake)
 	t.Cleanup(lp.Close)
 	cfg := config{
-		LPrintURI:    "ipp" + strings.TrimPrefix(lp.URL, "http") + "/ipp/print/Zebra-GK420t",
+		LPrintURI:    "ipp" + strings.TrimPrefix(lp.URL, "http") + "/ipp/print/Zebra-GX420t",
 		MaxUpload:    20 << 20,
 		MaxPages:     50,
 		MaxCopies:    100,
@@ -405,7 +405,7 @@ func TestPrinterEndpoint(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
 		t.Fatal(err)
 	}
-	if !p.Reachable || p.State != "idle" || p.Queue != "Zebra-GK420t" || len(p.Reasons) != 0 {
+	if !p.Reachable || p.State != "idle" || p.Queue != "Zebra-GX420t" || len(p.Reasons) != 0 {
 		t.Fatalf("got %+v", p)
 	}
 	if len(p.Media) != 2 || p.Media[1].Name != "na_index-4x6_4x6in" || !p.Media[1].Ready {

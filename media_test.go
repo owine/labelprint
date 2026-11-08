@@ -3,7 +3,7 @@ package main
 import "testing"
 
 func TestMediaOptions(t *testing.T) {
-	// A slice of what this LPrint really reports for the GK420t.
+	// A slice of what this LPrint really reports for the GX420t.
 	supported := []string{
 		"oe_4x6.5-label_4x6.5in", "na_index-4x6_4x6in", "oe_2x1-label_2x1in",
 		"oe_30859-paint-can-label_2.25x3.125in", "iso_a6_105x148mm",

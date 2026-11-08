@@ -86,7 +86,7 @@ func TestTruncateUTF8(t *testing.T) {
 
 func TestClientEndpoint(t *testing.T) {
 	cases := map[string]string{
-		"ipp://192.0.2.10:8000/ipp/print/Zebra-GK420t": "http://192.0.2.10:8000/ipp/print/Zebra-GK420t",
+		"ipp://192.0.2.10:8000/ipp/print/Zebra-GX420t": "http://192.0.2.10:8000/ipp/print/Zebra-GX420t",
 		"ipp://printer.lan/ipp/print/x":                "http://printer.lan:631/ipp/print/x",
 		"ipps://printer.lan:443/ipp/print/x":           "https://printer.lan:443/ipp/print/x",
 	}
