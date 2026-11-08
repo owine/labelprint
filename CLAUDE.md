@@ -22,7 +22,9 @@ example stack. The repo is public: keep real hostnames, addresses and deployment
 | `media.go` | turns LPrint's `media-supported` PWG names into dropdown labels and sizes |
 | `server.go` | HTTP handlers, upload limits, the print flow, cross-origin protection, security headers |
 | `maintenance.go` | `POST /api/printer/maintenance`: "feed a label" as a ZPL job (a one-dot box). No remote calibrate: that's SmartCal at the printer |
+| `share.go` | phone sharing: `POST /share` holds a checked upload in memory under a one-time token for the page's preview |
 | `web/` | the page: vanilla JS, owine design tokens (`tokens.css`), vendored fonts. No build step |
+| `shortcut/` | source (XML plist) of the signed iOS Shortcut served as `web/labelprint.shortcut`; see below |
 
 ## Constraints that shaped the code
 
@@ -48,6 +50,11 @@ Verified against the live LPrint (Get-Printer-Attributes) and the LPrint/PAPPL s
   aborted job with `client-error-not-possible`, and an unknown id with `client-error-not-found`; those messages are
   shown as LPrint sent them. A processing job only stops at its next page, so it can read "processing" for a moment
   after a successful cancel. Without an LPrint `auth-service`, PAPPL doesn't check that the canceller owns the job.
+- A share (`/share`, the manifest's `share_target`) only stages a file for the preview and never prints. Shares stay
+  in memory, single use, for at most 10 minutes. `web/sw.js` has no fetch handler on purpose. Without any service
+  worker, Android Chrome loads the start page and waits up to 5 s before sending a share. A fetch handler would see
+  every request, and must never cache anything. The app icons are `web/favicon.svg` rasterised with
+  `rsvg-convert` (192 and 512 px). The maskable icon is the same mark without the rounded corners.
 
 Never send to port 9100 directly. Every job must go through LPrint so it appears in LPrint's job list.
 
@@ -58,6 +65,29 @@ ZPL previews use zebrash in-process for exactly this reason. Don't log
 filenames or document contents (logs carry kind, size, copies, media and job ids only), and never commit real label
 files (`.gitignore` blocks `*.zpl` outside `testdata/`). The page loads nothing third-party; the CSP is
 `default-src 'self'`.
+
+## The iOS Shortcut
+
+`web/labelprint.shortcut` is a signed build of `shortcut/labelprint.shortcut.xml` (the XML lives outside `web/` so it
+isn't served). Actions 0 and 1 are Texts holding `https://labelprint.example` and `paste-your-share-key`, which two
+import questions (`ActionIndex` 0 and 1, `ParameterKey` `WFTextActionText`) replace with the user's address and share
+key. Import questions can only fill plain action parameters, hence the Texts. The rest POSTs Shortcut Input to
+`<address>/share` as form field `file`, with headers `Accept: application/json` and `X-Labelprint-Share: <key>`, and
+opens `<address>` + the reply's `url`. If you insert or reorder actions, fix the questions' `ActionIndex`. labelprint
+never checks the share key: the auth proxy matches it (README, "Letting the shortcut past your auth proxy"), so don't
+add an app-side check. A key left as the placeholder is sent harmlessly. Edit the XML, never the signed file, and keep
+real addresses and keys out of it. Rebuild:
+
+```sh
+plutil -lint shortcut/labelprint.shortcut.xml
+plutil -convert binary1 -o /tmp/unsigned.shortcut shortcut/labelprint.shortcut.xml
+shortcuts sign --mode anyone --input /tmp/unsigned.shortcut --output web/labelprint.shortcut
+```
+
+Signing needs a Mac signed in to iCloud. The signed file is an AEA archive whose only identity is a fresh
+Apple-issued certificate with a random CN, but check it (`strings web/labelprint.shortcut`) for a name, email or
+address before committing a new build. The certificate expires about a year after signing, so re-sign if iOS starts
+refusing the import.
 
 ## Commands
 

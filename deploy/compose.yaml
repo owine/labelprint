@@ -38,6 +38,15 @@ services:
       traefik.http.routers.labelprint.rule: "Host(`labelprint.${DOMAIN}`)"
       traefik.http.routers.labelprint.middlewares: "authelia@file"
       traefik.http.services.labelprint.loadbalancer.server.port: "8080"
+      # Optional, for the iPhone shortcut: let POST /share past the auth
+      # middleware only when it carries the share key. Set
+      # LABELPRINT_SHARE_KEY in .env (openssl rand -base64 32); the :? refuses
+      # to start with it empty. Traefik v2 spells the matcher Headers.
+      # traefik.http.routers.labelprint-share.rule: >-
+      #   Host(`labelprint.${DOMAIN}`) && Method(`POST`) && Path(`/share`)
+      #   && Header(`X-Labelprint-Share`, `${LABELPRINT_SHARE_KEY:?}`)
+      # traefik.http.routers.labelprint-share.priority: "100"
+      # traefik.http.routers.labelprint-share.service: "labelprint"
 
 networks:
   proxy:

@@ -177,6 +177,7 @@ html[data-theme="dark"] .icon-sun, html:not([data-theme="dark"]) .icon-moon { di
 
 /* ---------- jobs ---------- */
 .jobs { padding-block: 40px 64px; }
+.foot { padding-block: 0 32px; }
 .jobs-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
 .jobs-head h2 { font-size: var(--fs-20); font-weight: 400; }
 .table-wrap { overflow-x: auto; }

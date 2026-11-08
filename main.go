@@ -88,7 +88,8 @@ func main() {
 		log.Error("bad configuration", "error", err)
 		os.Exit(2)
 	}
-	s := &server{cfg: cfg, ipp: ipp, pdf: newPDFRenderer(cfg.DPI), zpl: newZPLRenderer(cfg.DPI), log: log}
+	s := &server{cfg: cfg, ipp: ipp, pdf: newPDFRenderer(cfg.DPI), zpl: newZPLRenderer(cfg.DPI),
+		shares: newShareStore(cfg.MaxUpload), log: log}
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -103,6 +104,7 @@ func main() {
 	defer stop()
 
 	go probeLPrint(ctx, log, ipp)
+	go s.shares.janitor(ctx, time.Minute)
 
 	errc := make(chan error, 1)
 	go func() {

@@ -593,9 +593,54 @@ $('theme').addEventListener('click', () => {
   try { localStorage.setItem('owine-theme', next); } catch { /* storage blocked */ }
 });
 
+// ---------------------------------------------------------------- shared from a phone
+
+// A file shared from a phone arrives as /?share=<token> (see share.go): fetch
+// it once and treat it like a chosen file, so it lands on the preview. The
+// query goes at once, so a reload can't ask for a token that's already used.
+const shareErrors = {
+  'too-big': () => `that file is over the ${state.maxMB} MB limit`,
+  unsupported: () => "labelprint can't print that file — share a zpl, pdf, png or jpeg",
+  unreadable: () => "couldn't read the shared file — try sharing it again",
+};
+
+async function fetchShared() {
+  const q = new URLSearchParams(location.search);
+  const token = q.get('share');
+  const failed = q.get('share-error');
+  if (token === null && failed === null) return null;
+  history.replaceState(null, '', location.pathname + location.hash);
+  if (failed !== null) return { error: (shareErrors[failed] || shareErrors.unreadable)() };
+  let res;
+  try {
+    res = await fetch('/api/share/' + encodeURIComponent(token), { cache: 'no-store' });
+  } catch {
+    return { error: "can't reach labelprint to collect the shared file — share it again" };
+  }
+  if (!res.ok) {
+    return { error: res.status === 404 ? 'that shared file has expired — share it again' : shareErrors.unreadable() };
+  }
+  const blob = await res.blob();
+  return { file: new File([blob], dispositionName(res.headers.get('Content-Disposition')), { type: blob.type }) };
+}
+
+// filename*=utf-8''… (non-ascii names) or filename=…, as Go's mime.FormatMediaType writes them
+function dispositionName(cd) {
+  const ext = /filename\*=utf-8''([^;]+)/i.exec(cd || '');
+  if (ext) { try { return decodeURIComponent(ext[1]); } catch { /* fall through */ } }
+  const plain = /filename=(?:"((?:\\.|[^"\\])*)"|([^;\s]+))/i.exec(cd || '');
+  if (plain) return plain[1] !== undefined ? plain[1].replace(/\\(.)/g, '$1') : plain[2];
+  return 'shared file';
+}
+
+// No fetch handler: see sw.js for why it exists at all.
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+
 // ---------------------------------------------------------------- boot
 
 (async () => {
+  // in parallel with the printer check
+  const shared = fetchShared().catch(() => ({ error: shareErrors.unreadable() }));
   const p = await loadPrinter();
   if (p) {
     state.maxMB = p.maxUploadMB;
@@ -606,6 +651,10 @@ $('theme').addEventListener('click', () => {
   restoreCopies();
   updateSummary();
   fillMedia(p || { media: [{ name: 'na_index-4x6_4x6in', label: '4 × 6 in' }], defaultMedia: 'na_index-4x6_4x6in' });
+  // after the size limit and media list are known, which the preview needs
+  const s = await shared;
+  if (s?.file) chooseFile(s.file);
+  else if (s?.error) showResult('err', s.error);
   loadJobs();
   setInterval(async () => { const q = await loadPrinter(); if (q) fillMedia(q); }, 30000);
 })();

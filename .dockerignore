@@ -10,3 +10,4 @@ Dockerfile
 .dockerignore
 .gitignore
 .yamllint
+shortcut
