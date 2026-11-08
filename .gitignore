@@ -14,3 +14,7 @@ docs/plans/
 # real labels have names and addresses in them — never commit samples
 *.zpl
 !testdata/*.zpl
+
+# label PDFs too: only generated fixtures belong in the repo
+*.pdf
+!testdata/*.pdf

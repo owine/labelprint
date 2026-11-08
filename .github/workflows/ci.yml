@@ -190,6 +190,16 @@ jobs:
           curl -fsS -F file=@testdata/label-2page.pdf http://localhost:8080/api/preview \
             | jq -e '.kind == "pdf" and .pageCount == 2 and (.pages | length) == 2' >/dev/null
 
+          echo "== carrier bitmaps pass through unscaled (pdfimages + pdftohtml in the image)"
+          curl -fsS -F file=@testdata/ups-2up.pdf http://localhost:8080/api/preview > ups.json
+          jq -e '.labels == 2 and ([.pages[].labelImages[]] | length == 2)
+            and ([.pages[].labelImages[].method] | all(. == "native"))' ups.json >/dev/null
+          for i in 0 1; do
+            jq -r "[.pages[].labelImages[]][$i].image" ups.json | sed 's|^data:image/png;base64,||' \
+              | base64 -d > label.png
+            file label.png | tee /dev/stderr | grep -q '812 x 1218'
+          done
+
           echo "== zpl renders inside the container (zebrash, embedded fonts)"
           curl -fsS -F file=@testdata/sample.zpl http://localhost:8080/api/preview \
             | jq -e '.kind == "zpl" and .labels == 1 and (.pages | length) == 1 and .previewError == null' >/dev/null
