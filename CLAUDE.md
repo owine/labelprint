@@ -22,7 +22,7 @@ example stack. The repo is public: keep real hostnames, addresses and deployment
 | `crop.go` | label detection on a 50 dpi ink mask: XY-cut, label-sized test, frame stripping, UPS doc-tab split |
 | `native.go` | path A: embedded bitmaps printed 1:1 (pdfimages gate, pdftohtml positions, verified against a render) |
 | `labels.go` | per page: which boxes (and the skip rule), and each box's label (path A, else B) |
-| `bitmap.go` | gray-image helpers: threshold, rotate, trim, scale, centre |
+| `bitmap.go` | gray-image helpers: threshold, rotate, trim, centre |
 | `zpl.go` | ZPL preview via zebrash (the only module dependency, `github.com/Gobbo89/zebrash`): panic recovery, timeout, canvas from `^PW`/`^LL` or the media |
 | `media.go` | turns LPrint's `media-supported` PWG names into dropdown labels and sizes |
 | `server.go` | HTTP handlers, upload limits, the print flow, cross-origin protection, security headers |

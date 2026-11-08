@@ -131,30 +131,6 @@ func isBilevel(img image.Image) bool {
 	return total > 0 && gray*200 <= total
 }
 
-// scaleArea resizes g to w×h by averaging the source pixels under each
-// destination pixel (nearest neighbour when enlarging).
-func scaleArea(g *image.Gray, w, h int) *image.Gray {
-	sw, sh := g.Rect.Dx(), g.Rect.Dy()
-	out := image.NewGray(image.Rect(0, 0, w, h))
-	for y := range h {
-		y0 := y * sh / h
-		y1 := max(y0+1, (y+1)*sh/h)
-		for x := range w {
-			x0 := x * sw / w
-			x1 := max(x0+1, (x+1)*sw/w)
-			sum, n := 0, 0
-			for sy := y0; sy < y1; sy++ {
-				for sx := x0; sx < x1; sx++ {
-					sum += int(g.Pix[sy*g.Stride+sx])
-					n++
-				}
-			}
-			out.Pix[y*out.Stride+x] = uint8(sum / n)
-		}
-	}
-	return out
-}
-
 // centre places g in the middle of a white w×h canvas, cropping any overflow.
 func centre(g *image.Gray, w, h int) *image.Gray {
 	out := newWhite(w, h)

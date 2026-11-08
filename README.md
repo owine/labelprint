@@ -58,7 +58,8 @@ The preview is drawn in the container too, for up to 12 pages or labels:
   the size dropdown otherwise, which is the dropdown's only job for ZPL. Labels drawn with `^POI` (printed rotated
   180°) are shown upright. If zebrash can't draw a label, the page says why and shows the source; printing isn't
   affected.
-- **PDFs** show the pages exactly as they'll be sent: 203 dpi grayscale.
+- **PDFs** show each page at 96 dpi with its label boxes drawn over it, and the labels cut from those boxes exactly as
+  they'll be sent: black and white at `RENDER_DPI`, turned and fitted to the label size.
 - **PNG and JPEG** previews are drawn by your browser.
 
 ## Label area (PDFs)
@@ -190,7 +191,7 @@ All settings are environment variables. Only `LPRINT_URI` is required.
 | `MAX_UPLOAD_MB` | `20` | upload cap |
 | `MAX_PAGES` | `50` | most PDF pages one print may send |
 | `MAX_COPIES` | `100` | |
-| `RENDER_DPI` | `203` | PDF and ZPL preview resolution. Match the printer |
+| `RENDER_DPI` | `203` | resolution of PDF labels and ZPL previews. Match the printer |
 | `USER_HEADER` | *(off)* | a request header your auth proxy sets to the signed-in user (Authelia: `Remote-User`), shown as the job's user in LPrint. Only set it if the proxy always overwrites that header |
 | `LISTEN_ADDR` | `:8080` | |
 

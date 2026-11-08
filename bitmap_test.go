@@ -50,16 +50,6 @@ func TestCentre(t *testing.T) {
 	}
 }
 
-func TestScaleArea(t *testing.T) {
-	g := grayFrom(4, 2, 0, 0, 255, 255, 0, 0, 255, 255)
-	if got := scaleArea(g, 2, 1); !slices.Equal(got.Pix, []uint8{0, 255}) {
-		t.Errorf("down: %v", got.Pix)
-	}
-	if got := scaleArea(grayFrom(1, 1, 7), 2, 2); !slices.Equal(got.Pix, []uint8{7, 7, 7, 7}) {
-		t.Errorf("up: %v", got.Pix)
-	}
-}
-
 func TestInkBounds(t *testing.T) {
 	g := grayFrom(4, 3, 255, 255, 255, 255, 255, 0, 255, 255, 255, 255, 0, 255)
 	r, ok := inkBounds(g, g.Rect, 128)
