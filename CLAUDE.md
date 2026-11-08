@@ -24,6 +24,7 @@ example stack. The repo is public: keep real hostnames, addresses and deployment
 | `maintenance.go` | `POST /api/printer/maintenance`: "feed a label" as a ZPL job (a one-dot box). No remote calibrate: that's SmartCal at the printer |
 | `share.go` | phone sharing: `POST /share` holds a checked upload in memory under a one-time token for the page's preview |
 | `web/` | the page: vanilla JS, owine design tokens (`tokens.css`), vendored fonts. No build step |
+| `shortcut/` | source (XML plist) of the signed iOS Shortcut served as `web/labelprint.shortcut`; see below |
 
 ## Constraints that shaped the code
 
@@ -64,6 +65,24 @@ ZPL previews use zebrash in-process for exactly this reason. Don't log
 filenames or document contents (logs carry kind, size, copies, media and job ids only), and never commit real label
 files (`.gitignore` blocks `*.zpl` outside `testdata/`). The page loads nothing third-party; the CSP is
 `default-src 'self'`.
+
+## The iOS Shortcut
+
+`web/labelprint.shortcut` is a signed build of `shortcut/labelprint.shortcut.xml` (the XML lives outside `web/` so it
+isn't served). Its first action is a Text holding `https://labelprint.example`, which an import question replaces with
+the user's address; the rest POSTs Shortcut Input to `<address>/share` as form field `file` and opens
+`<address>` + the reply's `url`. Edit the XML, never the signed file, and keep real addresses out of it. Rebuild:
+
+```sh
+plutil -lint shortcut/labelprint.shortcut.xml
+plutil -convert binary1 -o /tmp/unsigned.shortcut shortcut/labelprint.shortcut.xml
+shortcuts sign --mode anyone --input /tmp/unsigned.shortcut --output web/labelprint.shortcut
+```
+
+Signing needs a Mac signed in to iCloud. The signed file is an AEA archive whose only identity is a fresh
+Apple-issued certificate with a random CN, but check it (`strings web/labelprint.shortcut`) for a name, email or
+address before committing a new build. The certificate expires about a year after signing, so re-sign if iOS starts
+refusing the import.
 
 ## Commands
 

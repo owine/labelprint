@@ -47,6 +47,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /api/printer/maintenance", s.handleMaintenance)
 	mux.HandleFunc("POST /share", s.handleShare)
 	mux.HandleFunc("GET /api/share/{token}", s.handleSharedFile)
+	mux.Handle("GET /labelprint.shortcut", shortcutHandler(static))
 
 	// An auth proxy's session cookie rides along on any request to this host,
 	// so a cross-site form POST could otherwise print. CrossOriginProtection rejects

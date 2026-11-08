@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"io/fs"
 	"mime"
 	"net/http"
 	"net/url"
@@ -250,4 +251,17 @@ func contentDisposition(name string) string {
 		return v
 	}
 	return "attachment; filename*=utf-8''" + url.PathEscape(name)
+}
+
+// shortcutHandler serves the signed iOS Shortcut (web/labelprint.shortcut,
+// built from shortcut/labelprint.shortcut.xml) as a download. iPhone Safari
+// saves it, and opening it offers to add the shortcut, which asks for this
+// labelprint's address.
+func shortcutHandler(static fs.FS) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Type", "application/octet-stream")
+		h.Set("Content-Disposition", "attachment; filename=labelprint.shortcut")
+		http.ServeFileFS(w, r, static, "labelprint.shortcut")
+	})
 }

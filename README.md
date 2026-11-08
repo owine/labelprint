@@ -86,22 +86,37 @@ It needs HTTPS. The installed app then appears in the share sheet for PDFs, PNGs
 installed app shares Chrome's cookies, so stay signed in to your auth proxy. If the proxy sends the share to a login
 page, the file is lost, so open the app once to sign in, then share again.
 
-**iPhone (Shortcuts).** Safari can't be a share target, so use a Shortcut:
+**iPhone (Shortcuts).** Safari can't be a share target, so use a Shortcut. labelprint ships a ready-made one:
+
+1. Open labelprint in Safari on the iPhone and tap **add the share shortcut to an iPhone** at the bottom of the page.
+   Safari downloads `labelprint.shortcut`; open it from the downloads list.
+2. Choose **Add Shortcut** and answer the one question with your labelprint's address, e.g.
+   `https://labels.example.com` (no trailing slash).
+3. Share a label (PDF, image or `.zpl`) from Mail or Files and pick **labelprint**. Safari opens the preview.
+
+The shortcut POSTs the file to `/share` with `Accept: application/json`. `/share` then answers
+`{"url": "/?share=<token>"}` instead of redirecting, and errors come back as `{"error": "…"}`, which the shortcut
+shows. Your auth proxy has to let the shortcut through (see below). If it wants a header or token, edit the
+shortcut and add it to **Get Contents of URL**.
+
+<details>
+<summary>Building the shortcut by hand</summary>
 
 1. Create a shortcut. In its details, turn on **Show in Share Sheet** and accept **PDFs**, **Images** and **Files**.
 2. **Get Contents of URL**: `https://<your labelprint>/share`, method **POST**, request body **Form** with one
-   **File** field named `file` set to **Shortcut Input**. Add a header `Accept: application/json`, plus whatever
-   your auth proxy needs (see below).
+   field set to **Shortcut Input**. Add a header `Accept: application/json`, plus whatever your auth proxy needs.
 3. **Get Dictionary Value** `url` from **Contents of URL**. It's a path like `/?share=…`.
 4. **Text**: `https://<your labelprint>` followed by **Dictionary Value**, then **Open URLs** with that text.
 
-Safari opens the preview. With `Accept: application/json`, `/share` answers `{"url": "/?share=<token>"}` instead
-of redirecting, and errors come back as `{"error": "…"}`, which the shortcut shows.
+Two details are easy to get wrong. The form field must be of type **File** (not Text) and named `file`. The
+dictionary key must be the literal text `url`, typed in, not a variable.
+
+</details>
 
 > [!NOTE]
-> A Shortcut doesn't carry Safari's cookies, so your auth proxy has to let it through some other way, and how
-> depends on the proxy. Options include a header or token the proxy accepts for this one path, or a rule that
-> passes `POST /share` from your LAN or VPN without a login. Anyone the proxy lets through can stage files. They
+> A Shortcut doesn't carry Safari's cookies, so your auth proxy needs a rule for `POST /share` before the shortcut
+> works. How depends on the proxy. Options include a header or token the proxy accepts for this one path, or a rule
+> that passes `POST /share` from your LAN or VPN without a login. Anyone the proxy lets through can stage files. They
 > can't print, and they can't read a share without its link, but they can push your pending share out early by
 > filling the 8 slots. Opening the link in Safari still goes through your normal login.
 

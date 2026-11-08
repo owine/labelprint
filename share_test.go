@@ -463,3 +463,26 @@ func TestShareStoreByteCap(t *testing.T) {
 		}
 	}
 }
+
+// The iOS Shortcut downloads as a file, so iPhone Safari offers to add it, and
+// it's the signed build: an unsigned plist won't import on iOS.
+func TestShortcutDownload(t *testing.T) {
+	_, h := newTestServer(t)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/labelprint.shortcut", nil))
+	if rec.Code != 200 {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/octet-stream" {
+		t.Errorf("Content-Type %q", ct)
+	}
+	if cd := rec.Header().Get("Content-Disposition"); cd != "attachment; filename=labelprint.shortcut" {
+		t.Errorf("Content-Disposition %q", cd)
+	}
+	if rec.Header().Get("Content-Security-Policy") == "" {
+		t.Error("security headers missing")
+	}
+	if body := rec.Body.Bytes(); !bytes.HasPrefix(body, []byte("AEA1")) {
+		t.Errorf("not a signed shortcut (AEA1 archive): starts %q", body[:min(8, len(body))])
+	}
+}
