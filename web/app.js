@@ -65,8 +65,11 @@ const fmtIn = (v) => String(Math.round(v * 100) / 100);
 const arrBox = (a) => ({ x: a[0], y: a[1], w: a[2], h: a[3] });
 const cloneBoxes = (bs) => bs.map((b) => ({ ...b, tab: b.tab ? { ...b.tab } : null }));
 
+// A reply already on its way was asked for with the pages being dropped, so
+// it's dropped too (preview's seq check) rather than bring them back.
 function clearEdits() {
   state.pdf.pages = new Map();
+  state.previewSeq++;
 }
 
 function resetPdf() {
@@ -813,8 +816,12 @@ function updateSummary() {
 }
 $('copies').addEventListener('input', () => updateSummary());
 
+// Scheduling a preview makes any reply still on its way out of date: it was
+// asked for before this edit, and showing it would draw the old boxes' labels
+// as current (and clear "updating…") until the new reply lands.
 let previewTimer;
 function schedulePreview() {
+  state.previewSeq++;
   clearTimeout(previewTimer);
   previewTimer = setTimeout(preview, 450);
 }
