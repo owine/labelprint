@@ -364,6 +364,37 @@ func TestPlanSkipsPagesWithoutLabels(t *testing.T) {
 	if pl := doc.plan(ctx, []int{1, 2}, o); pl[1].Skip {
 		t.Error("a page with crops is never skipped")
 	}
+	// Editing page 1 sends it as crops; it still counts as having labels.
+	o = opts46
+	o.crops = map[int][]box{1: {{0.2, 0.2, 0.5, 0.5}}}
+	pl = doc.plan(ctx, []int{1, 2}, o)
+	if pl[0].Skip || !pl[1].Skip {
+		t.Errorf("crops on p1: skip p1=%v p2=%v; want only p2 skipped", pl[0].Skip, pl[1].Skip)
+	}
+}
+
+func TestPlanEditedPageCountsAsLabelsWhenAllFellBack(t *testing.T) {
+	var b pdfBuilder
+	for range 3 {
+		p := b.page(letter, 0)
+		for _, y := range []float64{1, 4.5, 8} {
+			p.paragraph(1, y, 5, 70)
+		}
+	}
+	doc := openTest(t, b.bytes())
+	ctx := context.Background()
+	pl := doc.plan(ctx, []int{1, 2, 3}, opts46)
+	for _, p := range pl {
+		if !p.Fallback || p.Skip {
+			t.Fatalf("p%d fallback=%v skip=%v; want all printing whole", p.Page, p.Fallback, p.Skip)
+		}
+	}
+	o := opts46
+	o.crops = map[int][]box{2: {{0.1, 0.1, 0.5, 0.5}}}
+	pl = doc.plan(ctx, []int{1, 2, 3}, o)
+	if !pl[0].Skip || pl[1].Skip || !pl[2].Skip {
+		t.Errorf("skips = %v %v %v; want true false true", pl[0].Skip, pl[1].Skip, pl[2].Skip)
+	}
 }
 
 func TestRenderLabelBlankBox(t *testing.T) {

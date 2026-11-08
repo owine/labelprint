@@ -68,8 +68,9 @@ func (d *pdfDoc) plan(ctx context.Context, pages []int, o labelOpts) []pagePlan 
 		out = append(out, d.detectPage(ctx, p, renders[p], o))
 	}
 	// A page with no label (instructions, say) beside pages with labels is
-	// left out; when nothing in the selection has one, it prints whole.
-	if slices.ContainsFunc(out, func(p pagePlan) bool { return p.Auto && !p.Fallback }) {
+	// left out; when nothing in the selection has one, it prints whole. A
+	// page with the user's own boxes counts as having labels.
+	if slices.ContainsFunc(out, func(p pagePlan) bool { return !p.Auto || !p.Fallback }) {
 		for i := range out {
 			out[i].Skip = out[i].Auto && out[i].Fallback
 		}

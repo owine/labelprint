@@ -536,6 +536,18 @@ func TestPreviewAndPrintSkipPagesWithNoLabel(t *testing.T) {
 	}
 }
 
+func TestPrintSkipsPagesWithNoLabelWhenOnePageIsEdited(t *testing.T) {
+	requirePoppler(t)
+	fake, h := newTestServer(t)
+	rec, _ := post(t, h, "/api/print", "x.pdf", fixLabelThenText(), map[string]string{"crops": `{"1": [[0.2,0.2,0.5,0.5]]}`})
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if n := len(fake.printJobs()); n != 1 {
+		t.Fatalf("%d jobs, want 1: page 2 has no label and page 1 was edited", n)
+	}
+}
+
 func TestPrintPDFNamesEachLabel(t *testing.T) {
 	requirePoppler(t)
 	fake, h := newTestServer(t)
