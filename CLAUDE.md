@@ -17,7 +17,12 @@ example stack. The repo is public: keep real hostnames, addresses and deployment
 |---|---|
 | `ipp.go` | hand-written IPP/2.0 encoder/decoder and the four operations used: Print-Job, Cancel-Job, Get-Printer-Attributes, Get-Jobs |
 | `detect.go` | content sniffing (PDF/PNG/JPEG magic, ZPL by `.zpl` or `^XA…^XZ`), page-range parsing |
-| `render.go` | `pdfinfo` + `pdftoppm` wrapper; one call per page, scratch files on the `/tmp` tmpfs |
+| `render.go` | `pdfinfo`/`pdftoppm` wrapper: page geometry, page and box renders, path B (render to the label's dots), scratch files on the `/tmp` tmpfs |
+| `geom.go` | `box` (fractions of the page as displayed), page geometry, the pdftohtml offset table, `crops`/`layout` parsing |
+| `crop.go` | label detection on a 50 dpi ink mask: XY-cut, label-sized test, frame stripping, UPS doc-tab split |
+| `native.go` | path A: embedded bitmaps printed 1:1 (pdfimages gate, pdftohtml positions, verified against a render) |
+| `labels.go` | per page: which boxes (and the skip rule), and each box's label (path A, else B) |
+| `bitmap.go` | gray-image helpers: threshold, rotate, trim, centre |
 | `zpl.go` | ZPL preview via zebrash (the only module dependency, `github.com/Gobbo89/zebrash`): panic recovery, timeout, canvas from `^PW`/`^LL` or the media |
 | `media.go` | turns LPrint's `media-supported` PWG names into dropdown labels and sizes |
 | `server.go` | HTTP handlers, upload limits, the print flow, cross-origin protection, security headers |
@@ -32,11 +37,25 @@ Verified against the live LPrint (Get-Printer-Attributes) and the LPrint/PAPPL s
 
 - LPrint accepts `application/vnd.zebra-zpl`, `image/png`, `image/jpeg`, `image/pwg-raster`, `image/urf`. **No PDF**,
   so PDFs are rasterised here.
-- `multiple-document-jobs-supported = false`, so it's one Print-Job per PDF page.
+- `multiple-document-jobs-supported = false`, so it's one Print-Job per PDF label.
 - `page-ranges` isn't a job-creation attribute, so ranges are applied at render time.
 - LPrint's ZPL driver (`lprint_zpl_printfile`) copies raw data through once and **ignores `copies`**. ZPL copies are
   made by repeating the document in a single job. Don't "fix" this by sending `copies`.
 - PAPPL's image path does honour `copies`, `print-scaling` and auto-rotation, so PNG/JPEG/PDF pages rely on them.
+- PDF labels are thresholded to pure black/white at the printer's dots, so PAPPL's dither never sees gray.
+- Labels never enlarge: path B scales by `min(1, fit)` and path A is 1:1. Carriers ask for true size. The page warns
+  when a label shrinks below 95% / 87%.
+- Detection counts anything under gray 240 as ink, so hairline label borders survive the 50 dpi render. A thin frame
+  round a label image is stripped, but only at a dead end (no gutters, not label-sized); a doc tab is at most 0.2x
+  the media's long side.
+- In `layout=auto`, a page with no label is skipped when other selected pages have labels. Pages the user gave
+  `crops` for count as having labels and are never skipped.
+- Native passthrough (path A) only applies after the bitmap matches a render of the box, and it never scales.
+  Verification is local (a sliding window, plus a check for stray ink beside the image), runs at the image's own
+  resolution, and refuses when anything else is drawn in the box (e.g. a generator's logo over the bitmap). That's on
+  purpose: falling back to a render is safe, printing hidden content is not.
+- pdftohtml clamps `-zoom` to 3 and reports positions relative to the MediaBox (see `htmlOffset`).
+- Logs carry no poppler output or label text, only page numbers and fixed reasons.
 - zebrash is the [Gobbo89 fork](https://github.com/Gobbo89/zebrash): upstream
   [ingridhq/zebrash](https://github.com/ingridhq/zebrash) has been unmaintained since its maintainer left Ingrid in
   2026, and the fork carries the fixes (Code 128 `>5`, size limits for malformed ZPL). It's one person's fork, so

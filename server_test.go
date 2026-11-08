@@ -10,10 +10,12 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeLPrint answers the operations the app uses and records every request it
@@ -150,8 +152,9 @@ func newTestServerS(t *testing.T, mutate ...func(*config)) (*fakeLPrint, *server
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &server{cfg: cfg, ipp: ipp, pdf: newPDFRenderer(cfg.DPI), zpl: newZPLRenderer(cfg.DPI),
-		shares: newShareStore(cfg.MaxUpload), log: slog.New(slog.DiscardHandler)}
+	log := slog.New(slog.DiscardHandler)
+	s := &server{cfg: cfg, ipp: ipp, pdf: newPDFRenderer(cfg.DPI, log), zpl: newZPLRenderer(cfg.DPI),
+		shares: newShareStore(cfg.MaxUpload), log: log}
 	return fake, s
 }
 
@@ -187,8 +190,11 @@ func opAttr(m *ippMessage, name string) *ippAttr  { return m.group(tagOperationG
 
 func requirePoppler(t *testing.T) {
 	t.Helper()
-	for _, tool := range []string{"pdfinfo", "pdftoppm"} {
+	for _, tool := range []string{"pdfinfo", "pdftoppm", "pdfimages", "pdftohtml"} {
 		if _, err := exec.LookPath(tool); err != nil {
+			if os.Getenv("CI") != "" {
+				t.Fatalf("%s not installed: CI must run the PDF tests", tool)
+			}
 			t.Skipf("%s not installed (poppler-utils)", tool)
 		}
 	}
@@ -285,6 +291,11 @@ func TestPrintPDFOneJobPerPage(t *testing.T) {
 		// 4×6 in at 203 dpi
 		if b := img.Bounds(); b.Dx() != 812 || b.Dy() != 1218 {
 			t.Errorf("page %d is %dx%d, want 812x1218", i, b.Dx(), b.Dy())
+		}
+		for _, v := range toGray(img).Pix {
+			if v != 0 && v != 255 {
+				t.Fatalf("page %d has gray pixels", i)
+			}
 		}
 	}
 	if n := len(out["jobs"].([]any)); n != 2 {
@@ -400,20 +411,210 @@ func TestPreviewPDF(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
-	if out["kind"] != "pdf" || out["pageCount"] != 2.0 || out["selected"] != 2.0 {
+	if out["kind"] != "pdf" || out["pageCount"] != 2.0 || out["selected"] != 2.0 || out["labels"] != 2.0 {
 		t.Fatalf("got %v", out)
 	}
+	if out["widthIn"] != 4.0 || out["heightIn"] != 6.0 {
+		t.Errorf("media size %v × %v", out["widthIn"], out["heightIn"])
+	}
 	pages := out["pages"].([]any)
-	if len(pages) != 2 || !strings.HasPrefix(pages[0].(map[string]any)["image"].(string), "data:image/png;base64,") {
-		t.Fatalf("pages = %v", pages)
+	p := pages[0].(map[string]any)
+	if len(pages) != 2 || !strings.HasPrefix(p["image"].(string), "data:image/png;base64,") ||
+		p["auto"] != true || p["widthIn"] != 4.0 || len(p["boxes"].([]any)) != 1 {
+		t.Fatalf("page = %v", p)
+	}
+	li := p["labelImages"].([]any)[0].(map[string]any)
+	if li["method"] != "render" || !strings.HasPrefix(li["image"].(string), "data:image/png;base64,") {
+		t.Fatalf("label image = %v", li)
 	}
 	if len(fake.printJobs()) != 0 {
 		t.Fatal("preview printed")
 	}
 
 	rec, out = post(t, h, "/api/preview", "x.pdf", makeLabelPDF(2), map[string]string{"pages": "3"})
-	if rec.Code != 400 || !strings.Contains(out["error"].(string), "outside") {
+	if rec.Code != 400 || !strings.Contains(out["error"].(string), "outside") || out["field"] != "pages" {
 		t.Fatalf("bad range: status %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestPreviewNativeAndCrops(t *testing.T) {
+	requirePoppler(t)
+	_, h := newTestServer(t)
+	rec, out := post(t, h, "/api/preview", "ups.pdf", fixUPS2up(true, 200), nil) // no media: default applies
+	if rec.Code != 200 || out["labels"] != 2.0 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	for _, li := range out["pages"].([]any)[0].(map[string]any)["labelImages"].([]any) {
+		if m := li.(map[string]any); m["method"] != "native" || m["ppi"] != 200.0 {
+			t.Errorf("label %v", m)
+		}
+	}
+
+	// 8 boxes written to 6 decimals is over 300 bytes: past the old 256-byte field cap
+	var boxes []string
+	for i := range 8 {
+		boxes = append(boxes, fmt.Sprintf("[%.6f, 0.100000, 0.125000, 0.200000]", float64(i)*0.1))
+	}
+	if n := len(strings.Join(boxes, ",")); n <= 300 {
+		t.Fatalf("crops is only %d bytes; the test needs more than 256", n)
+	}
+	crops := `{"1": [` + strings.Join(boxes, ",") + `]}`
+	rec, out = post(t, h, "/api/preview", "x.pdf", makeLabelPDF(2), map[string]string{"crops": crops})
+	if rec.Code != 200 || out["labels"] != 9.0 {
+		t.Fatalf("crops: status %d labels %v: %s", rec.Code, out["labels"], rec.Body)
+	}
+	if p := out["pages"].([]any)[0].(map[string]any); p["auto"] == true || len(p["boxes"].([]any)) != 8 {
+		t.Errorf("page 1 should use the crops: %v", p["boxes"])
+	}
+
+	rec, out = post(t, h, "/api/preview", "x.pdf", makeLabelPDF(1), map[string]string{"crops": `{"1": [[0,0,0.01,0.01]]}`})
+	if rec.Code != 400 || out["field"] != "crops" {
+		t.Fatalf("bad crops: status %d: %s", rec.Code, rec.Body)
+	}
+
+	rec, out = post(t, h, "/api/preview", "x.pdf", makeLabelPDF(1), map[string]string{"layout": "page"})
+	b := out["pages"].([]any)[0].(map[string]any)["boxes"].([]any)[0].([]any)
+	if rec.Code != 200 || b[0] != 0.0 || b[2] != 1.0 {
+		t.Fatalf("layout=page: %v", b)
+	}
+}
+
+func TestPreviewLabelScale(t *testing.T) {
+	requirePoppler(t)
+	_, h := newTestServer(t)
+	scales := func(pdf []byte) []float64 {
+		t.Helper()
+		rec, out := post(t, h, "/api/preview", "x.pdf", pdf, nil)
+		if rec.Code != 200 {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body)
+		}
+		var s []float64
+		for _, li := range out["pages"].([]any)[0].(map[string]any)["labelImages"].([]any) {
+			v, ok := li.(map[string]any)["scale"].(float64)
+			if !ok {
+				t.Fatalf("label %v has no scale", li)
+			}
+			s = append(s, v)
+		}
+		return s
+	}
+	if s := scales(fixWide()); len(s) != 1 || s[0] >= 1 || s[0] < 0.9 {
+		t.Errorf("wide label scales = %v, want one just under 1", s)
+	}
+	if s := scales(fixUPS2up(true, 200)); len(s) != 2 || s[0] != 1 || s[1] != 1 {
+		t.Errorf("native label scales = %v, want 1 each", s)
+	}
+}
+
+// "include" on a doc tab shows the scale before it's chosen: the figure the
+// preview gives once the page sends the joined box as its crops.
+func TestPreviewTabScale(t *testing.T) {
+	requirePoppler(t)
+	_, h := newTestServer(t)
+	pdf := fixReturn(1340, 206, 196)
+	rec, out := post(t, h, "/api/preview", "x.pdf", pdf, nil)
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	p := out["pages"].([]any)[0].(map[string]any)
+	ts, ok := p["tabScales"].([]any)
+	if !ok || len(ts) != 1 {
+		t.Fatalf("tabScales = %v", p["tabScales"])
+	}
+	want := ts[0].(float64)
+	if want <= 0 || want >= 1 {
+		t.Fatalf("include scale %v, want a shrink", want)
+	}
+	if s := p["labelImages"].([]any)[0].(map[string]any)["scale"]; s != 1.0 {
+		t.Errorf("the label on its own is scaled to %v, want 1", s)
+	}
+	// as the page builds it: unionBox of the two boxes as sent, to 4 decimals
+	f := func(v any) box {
+		a := v.([]any)
+		return box{a[0].(float64), a[1].(float64), a[2].(float64), a[3].(float64)}
+	}
+	u := f(p["boxes"].([]any)[0]).union(f(p["tabs"].([]any)[0])).round4()
+	crops := fmt.Sprintf(`{"1": [[%v, %v, %v, %v]]}`, u.X, u.Y, u.W, u.H)
+	rec, out = post(t, h, "/api/preview", "x.pdf", pdf, map[string]string{"crops": crops})
+	if rec.Code != 200 {
+		t.Fatalf("include: status %d: %s", rec.Code, rec.Body)
+	}
+	p = out["pages"].([]any)[0].(map[string]any)
+	if got := p["labelImages"].([]any)[0].(map[string]any)["scale"]; got != want {
+		t.Errorf("included label scaled to %v, but include said %v", got, want)
+	}
+	if p["tabScales"] != nil {
+		t.Errorf("a page with crops has no detected tabs: %v", p["tabScales"])
+	}
+
+	// no doc tab, no tabScales
+	_, out = post(t, h, "/api/preview", "x.pdf", makeLabelPDF(1), nil)
+	if v := out["pages"].([]any)[0].(map[string]any)["tabScales"]; v != nil {
+		t.Errorf("tabScales without a tab: %v", v)
+	}
+}
+
+func TestPreviewAndPrintSkipPagesWithNoLabel(t *testing.T) {
+	requirePoppler(t)
+	fake, h := newTestServer(t)
+	rec, out := post(t, h, "/api/preview", "x.pdf", fixLabelThenText(), nil)
+	if rec.Code != 200 || out["labels"] != 1.0 {
+		t.Fatalf("status %d labels %v: %s", rec.Code, out["labels"], rec.Body)
+	}
+	pages := out["pages"].([]any)
+	if p := pages[0].(map[string]any); p["skipped"] != nil || len(p["labelImages"].([]any)) != 1 {
+		t.Errorf("page 1 = skipped %v, %v label images", p["skipped"], p["labelImages"])
+	}
+	p := pages[1].(map[string]any)
+	if p["skipped"] != true || p["labelImages"] != nil || len(p["boxes"].([]any)) != 1 {
+		t.Errorf("page 2 should be skipped with its fallback box and no label images: %v", p)
+	}
+
+	if rec, _ := post(t, h, "/api/print", "x.pdf", fixLabelThenText(), nil); rec.Code != 200 {
+		t.Fatalf("print: status %d: %s", rec.Code, rec.Body)
+	}
+	if n := len(fake.printJobs()); n != 1 {
+		t.Fatalf("%d jobs, want 1: the skipped page sends none", n)
+	}
+	rec, _ = post(t, h, "/api/print", "x.pdf", fixLabelThenText(), map[string]string{"crops": `{"2": [[0,0,1,1]]}`})
+	if rec.Code != 200 {
+		t.Fatalf("print with crops: status %d: %s", rec.Code, rec.Body)
+	}
+	if n := len(fake.printJobs()); n != 3 {
+		t.Fatalf("%d jobs in all, want 3: including page 2 sends it", n-1)
+	}
+}
+
+func TestPrintSkipsPagesWithNoLabelWhenOnePageIsEdited(t *testing.T) {
+	requirePoppler(t)
+	fake, h := newTestServer(t)
+	rec, _ := post(t, h, "/api/print", "x.pdf", fixLabelThenText(), map[string]string{"crops": `{"1": [[0.2,0.2,0.5,0.5]]}`})
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if n := len(fake.printJobs()); n != 1 {
+		t.Fatalf("%d jobs, want 1: page 2 has no label and page 1 was edited", n)
+	}
+}
+
+func TestPrintPDFNamesEachLabel(t *testing.T) {
+	requirePoppler(t)
+	fake, h := newTestServer(t)
+	rec, _ := post(t, h, "/api/print", "two.pdf", fix2up(), map[string]string{"copies": "3"})
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	jobs := fake.printJobs()
+	if len(jobs) != 2 {
+		t.Fatalf("%d jobs", len(jobs))
+	}
+	for i, want := range []string{"two.pdf · label 1/2", "two.pdf · label 2/2"} {
+		if got := opAttr(jobs[i], "job-name").str(); got != want {
+			t.Errorf("job-name = %q, want %q", got, want)
+		}
+		if got := jobAttr(jobs[i], "copies").int(); got != 3 {
+			t.Errorf("copies = %d", got)
+		}
 	}
 }
 
@@ -610,4 +811,139 @@ func TestCancelJobCrossSiteRejected(t *testing.T) {
 	if len(fake.ops(opCancelJob)) != 0 {
 		t.Fatal("cross-site request reached lprint")
 	}
+}
+
+func TestErrorsNameTheirField(t *testing.T) {
+	requirePoppler(t)
+	_, h := newTestServer(t, func(c *config) { c.MaxPages = 2 })
+	cases := []struct {
+		name   string
+		fields map[string]string
+		field  string
+	}{
+		{"bad range", map[string]string{"pages": "9"}, "pages"},
+		{"too many pages, preview too", nil, "pages"},
+		{"field over its cap", map[string]string{"pages": strings.Repeat("1,", 200)}, "pages"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec, out := post(t, h, "/api/preview", "x.pdf", makeLabelPDF(3), c.fields)
+			if rec.Code != 400 || out["field"] != c.field {
+				t.Fatalf("status %d, field %v: %s", rec.Code, out["field"], rec.Body)
+			}
+		})
+	}
+}
+
+func TestCropsFieldMayExceed256Bytes(t *testing.T) {
+	_, h := newTestServer(t)
+	// ZPL ignores crops; this only proves the field isn't cut or refused.
+	rec, _ := post(t, h, "/api/preview", "a.zpl", []byte("^XA^XZ"), map[string]string{"crops": strings.Repeat(" ", 1000) + "{}"})
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestHugePageIsA422(t *testing.T) {
+	requirePoppler(t)
+	fake, h := newTestServer(t)
+	shimTool(t, "pdftoppm", `echo "pdftoppm ran" >&2; exit 1`) // nothing may be drawn
+	for _, c := range []struct {
+		path, pages, layout string
+		page                int
+	}{
+		{"/api/preview", "1", "page", 1}, // the 96 dpi page image
+		{"/api/preview", "2", "auto", 2}, // the 50 dpi detection render
+		{"/api/print", "1", "page", 1},   // the label at 203 dpi
+	} {
+		rec, out := post(t, h, c.path, "x.pdf", fixHugePages(), map[string]string{"pages": c.pages, "layout": c.layout})
+		want := fmt.Sprintf("page %d is too large to print as a label", c.page)
+		if rec.Code != 422 || out["error"] != want {
+			t.Errorf("%s pages=%s layout=%s: %d %s, want 422 %q", c.path, c.pages, c.layout, rec.Code, rec.Body, want)
+		}
+	}
+	if n := len(fake.printJobs()); n != 0 {
+		t.Errorf("%d jobs sent", n)
+	}
+}
+
+// breakDetection makes pdftoppm fail for the 50 dpi detection render only.
+func breakDetection(t *testing.T) {
+	shimTool(t, "pdftoppm", `case " $* " in *" -r 50.0000 "*) echo "detection broke" >&2; exit 1;; esac
+exec "$REAL" "$@"`)
+}
+
+// Detection that fails at print time refuses the print: falling back would
+// print whole pages, and skip pages, differently from what the preview showed.
+func TestPrintRefusesWhenDetectionFails(t *testing.T) {
+	requirePoppler(t)
+	fake, h := newTestServer(t)
+	breakDetection(t)
+	pdf := fixLabelThenText()
+	rec, out := post(t, h, "/api/print", "x.pdf", pdf, nil)
+	want := "couldn't find the labels on page 1 this time — try again, or choose whole page"
+	if rec.Code != 422 || out["error"] != want {
+		t.Fatalf("print: %d %s, want 422 %q", rec.Code, rec.Body, want)
+	}
+	if n := len(fake.printJobs()); n != 0 {
+		t.Fatalf("%d jobs sent", n)
+	}
+	// The preview keeps falling back to the whole page.
+	rec, out = post(t, h, "/api/preview", "x.pdf", pdf, nil)
+	if rec.Code != 200 {
+		t.Fatalf("preview: %d %s", rec.Code, rec.Body)
+	}
+	for _, p := range out["pages"].([]any) {
+		if p := p.(map[string]any); p["fallback"] != true {
+			t.Errorf("preview page %v: fallback %v", p["page"], p["fallback"])
+		}
+	}
+	// Whole page and the user's own boxes don't detect.
+	for _, f := range []map[string]string{{"layout": "page"}, {"crops": `{"1": [[0,0,1,1]], "2": [[0,0,1,1]]}`}} {
+		if rec, _ := post(t, h, "/api/print", "x.pdf", pdf, f); rec.Code != 200 {
+			t.Errorf("print %v: %d %s", f, rec.Code, rec.Body)
+		}
+	}
+	if n := len(fake.printJobs()); n != 4 {
+		t.Errorf("%d jobs, want 2 + 2", n)
+	}
+}
+
+// A PDF request has one overall deadline. Running out of it is a clear 504,
+// never a 500 with poppler's wording, and print doesn't mistake it for a
+// detection failure.
+func TestPDFRequestDeadline(t *testing.T) {
+	requirePoppler(t)
+	want := "that pdf took too long to prepare — try fewer pages"
+	check := func(t *testing.T, h http.Handler, fields map[string]string) {
+		t.Helper()
+		for _, path := range []string{"/api/preview", "/api/print"} {
+			rec, out := post(t, h, path, "x.pdf", fixLabelThenText(), fields)
+			if rec.Code != 504 || out["error"] != want {
+				t.Errorf("%s %v: %d %s, want 504 %q", path, fields, rec.Code, rec.Body, want)
+			}
+		}
+	}
+	t.Run("before anything runs", func(t *testing.T) {
+		fake, s := newTestServerS(t)
+		s.pdf.deadline = time.Nanosecond
+		check(t, s.routes(), nil)
+		if n := len(fake.printJobs()); n != 0 {
+			t.Errorf("%d jobs sent", n)
+		}
+	})
+	t.Run("while rendering", func(t *testing.T) {
+		fake, s := newTestServerS(t)
+		s.pdf.deadline = 500 * time.Millisecond
+		shimTool(t, "pdftoppm", `exec sleep 5`) // pdfinfo answers; every render hangs
+		start := time.Now()
+		check(t, s.routes(), nil)
+		check(t, s.routes(), map[string]string{"layout": "page"})
+		if d := time.Since(start); d > 15*time.Second {
+			t.Errorf("took %s: the deadline didn't stop poppler", d)
+		}
+		if n := len(fake.printJobs()); n != 0 {
+			t.Errorf("%d jobs sent", n)
+		}
+	})
 }

@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -186,6 +187,13 @@ type upload struct {
 	Fields   map[string]string
 }
 
+// Form fields other than the file are small. crops can carry up to 8 boxes
+// for each previewed page; every other field fits in defaultFieldCap. Going
+// over a cap is an error, never a silent cut.
+var fieldCaps = map[string]int{"crops": 16 << 10}
+
+const defaultFieldCap = 256
+
 // readUpload streams the multipart body into memory (no temp files: the root
 // filesystem is read-only and 20 MB fits comfortably in RAM) and sniffs the
 // document type.
@@ -220,11 +228,19 @@ func (s *server) readUpload(w http.ResponseWriter, r *http.Request) (*upload, er
 			up.Filename, up.Data = cleanFilename(part.FileName()), data
 			continue
 		}
-		v, err := io.ReadAll(io.LimitReader(part, 256))
+		name := truncateUTF8(part.FormName(), 40)
+		limit := defaultFieldCap
+		if c, ok := fieldCaps[name]; ok {
+			limit = c
+		}
+		v, err := io.ReadAll(io.LimitReader(part, int64(limit)+1))
 		if isMaxBytes(err) {
 			return nil, tooBig
 		}
-		up.Fields[part.FormName()] = strings.TrimSpace(string(v))
+		if len(v) > limit {
+			return nil, fieldError(name, "%s is too long", name)
+		}
+		up.Fields[name] = strings.TrimSpace(string(v))
 	}
 	if up.Data == nil {
 		return nil, badRequest("choose a file first")
@@ -263,23 +279,48 @@ func cleanFilename(name string) string {
 type previewPage struct {
 	Page  int    `json:"page"`
 	Image string `json:"image"` // data: URL
+	// pdf only
+	WidthIn  float64 `json:"widthIn,omitempty"` // the page as displayed
+	HeightIn float64 `json:"heightIn,omitempty"`
+	Auto     bool    `json:"auto,omitempty"`
+	Fallback bool    `json:"fallback,omitempty"`
+	Skipped  bool    `json:"skipped,omitempty"` // no label here while other pages have one: not printing
+	Boxes    []box   `json:"boxes,omitempty"`
+	Tabs     []*box  `json:"tabs,omitempty"`
+	// parallel to Boxes: the scale its label would print at with its doc tab
+	// included (0: no tab, or not previewed), so "include" shows the figure
+	// it will get before it's chosen
+	TabScales   []float64      `json:"tabScales,omitempty"`
+	LabelImages []previewLabel `json:"labelImages,omitempty"`
 }
+
+type previewLabel struct {
+	Image  string  `json:"image"`  // exactly what LPrint will receive
+	Method string  `json:"method"` // native or render
+	PPI    int     `json:"ppi,omitempty"`
+	Scale  float64 `json:"scale"` // against true size: 1, or below 1 when shrunk to fit
+}
+
+const (
+	maxPreviewPages  = 12
+	maxPreviewLabels = 12
+	previewDPI       = 96
+)
 
 type previewResponse struct {
 	Kind      docKind       `json:"kind"`
 	PageCount int           `json:"pageCount,omitempty"` // pages in the pdf
 	Selected  int           `json:"selected,omitempty"`  // pages the range picks
 	Pages     []previewPage `json:"pages,omitempty"`     // first maxPreviewPages of those
-	Labels    int           `json:"labels,omitempty"`    // labels in the zpl
-	// zpl only: the canvas the preview was drawn on, and why there's no
-	// picture if zebrash couldn't draw one. A failed preview never blocks
-	// printing: the printer interprets the zpl itself.
-	WidthIn      float64 `json:"widthIn,omitempty"`
-	HeightIn     float64 `json:"heightIn,omitempty"`
-	PreviewError string  `json:"previewError,omitempty"`
+	Labels    int           `json:"labels,omitempty"`    // labels in the zpl, or label boxes across the pdf's selected pages
+	// The canvas the labels were drawn on (zpl, and pdf when the media size
+	// is known).
+	WidthIn  float64 `json:"widthIn,omitempty"`
+	HeightIn float64 `json:"heightIn,omitempty"`
+	// zpl only: why there's no picture if zebrash couldn't draw one. A failed
+	// preview never blocks printing: the printer interprets the zpl itself.
+	PreviewError string `json:"previewError,omitempty"`
 }
-
-const maxPreviewPages = 12
 
 func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	up, err := s.readUpload(w, r)
@@ -308,24 +349,10 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		resp.WidthIn, resp.HeightIn = p.Size.WidthIn, p.Size.HeightIn
 		resp.Pages = dataURLs(p.Pages)
 	case kindPDF:
-		doc, err := s.pdf.open(r.Context(), up.Data)
-		if err != nil {
+		if err := s.previewPDF(r.Context(), up, &resp); err != nil {
 			s.fail(w, err)
 			return
 		}
-		defer doc.Close()
-		pages, err := parsePageRange(up.Fields["pages"], doc.Pages)
-		if err != nil {
-			s.fail(w, err)
-			return
-		}
-		resp.PageCount, resp.Selected = doc.Pages, len(pages)
-		rendered, err := doc.render(r.Context(), pages[:min(len(pages), maxPreviewPages)])
-		if err != nil {
-			s.fail(w, &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()})
-			return
-		}
-		resp.Pages = dataURLs(rendered)
 	}
 	// PNG/JPEG: the browser already has the bytes and shows them itself.
 	writeJSON(w, http.StatusOK, resp)
@@ -334,9 +361,144 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 func dataURLs(pages []renderedPage) []previewPage {
 	out := make([]previewPage, 0, len(pages))
 	for _, p := range pages {
-		out = append(out, previewPage{Page: p.Page, Image: "data:image/png;base64," + base64.StdEncoding.EncodeToString(p.PNG)})
+		out = append(out, previewPage{Page: p.Page, Image: dataURL(p.PNG)})
 	}
 	return out
+}
+
+func dataURL(png []byte) string {
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
+}
+
+// mediaFor is the label size to detect and draw for: the chosen media, or the
+// default when it's missing or has no size in its name.
+func (s *server) mediaFor(name string) (labelSize, bool) {
+	if m, ok := mediaSize(name); ok {
+		return m, true
+	}
+	return mediaSize(s.cfg.DefaultMedia)
+}
+
+func (s *server) labelOpts(fields map[string]string, doc *pdfDoc, pages []int, mediaName string) (labelOpts, error) {
+	layout, err := parseLayout(fields["layout"])
+	if err != nil {
+		return labelOpts{}, err
+	}
+	crops, err := parseCrops(fields["crops"], pages, func(p int) (float64, float64) { return doc.geom(p).inches() })
+	if err != nil {
+		return labelOpts{}, err
+	}
+	media, ok := s.mediaFor(mediaName)
+	return labelOpts{layout: layout, crops: crops, media: media, known: ok, canvas: canvasFor(media, ok, s.cfg.DPI)}, nil
+}
+
+// openPDF opens the upload and checks its page range against MAX_PAGES,
+// before anything is rendered.
+func (s *server) openPDF(ctx context.Context, up *upload) (*pdfDoc, []int, error) {
+	doc, err := s.pdf.open(ctx, up.Data)
+	if err != nil {
+		return nil, nil, err
+	}
+	pages, err := parsePageRange(up.Fields["pages"], doc.Pages)
+	if err == nil && len(pages) > s.cfg.MaxPages {
+		err = tooManyPages(len(pages), s.cfg.MaxPages)
+	}
+	if err != nil {
+		doc.Close()
+		return nil, nil, err
+	}
+	return doc, pages, nil
+}
+
+// previewPDF fills in a pdf's pages, their label boxes and, for the first
+// maxPreviewLabels boxes, the label images exactly as they'd be sent.
+// Detection runs on every selected page so labels is the full count; pages
+// and label images are capped.
+func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewResponse) (err error) {
+	ctx, cancel := context.WithTimeout(ctx, s.pdf.deadline)
+	defer cancel()
+	defer func() { err = tookTooLong(ctx, err) }() // deferred after cancel, so it runs first
+
+	release, err := s.pdf.acquire(ctx) // held for every poppler call, pdfinfo included
+	if err != nil {
+		return err
+	}
+	defer release()
+	doc, pages, err := s.openPDF(ctx, up)
+	if err != nil {
+		return err
+	}
+	defer doc.Close()
+	o, err := s.labelOpts(up.Fields, doc, pages, up.Fields["media"])
+	if err != nil {
+		return err
+	}
+
+	resp.PageCount, resp.Selected = doc.Pages, len(pages)
+	if o.known {
+		resp.WidthIn, resp.HeightIn = round2(o.media.WidthMm/25.4), round2(o.media.HeightMm/25.4)
+	}
+	plans, err := doc.plan(ctx, pages, o)
+	if err != nil {
+		return err
+	}
+	for _, pl := range plans {
+		if !pl.Skip {
+			resp.Labels += len(pl.Boxes)
+		}
+	}
+	shown := plans[:min(len(plans), maxPreviewPages)]
+	shownPages := make([]int, len(shown))
+	for i, pl := range shown {
+		shownPages[i] = pl.Page
+	}
+	images, err := doc.renderPages(ctx, shownPages, previewDPI, true)
+	if err != nil {
+		return &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
+	}
+	budget := maxPreviewLabels
+	for _, pl := range shown {
+		pw, ph := doc.geom(pl.Page).inches()
+		pp := previewPage{Page: pl.Page, Image: dataURL(images[pl.Page]), WidthIn: round2(pw), HeightIn: round2(ph),
+			Auto: pl.Auto, Fallback: pl.Fallback, Skipped: pl.Skip, Boxes: pl.Boxes, Tabs: pl.Tabs}
+		for i, b := range pl.Boxes {
+			if budget == 0 || pl.Skip { // a skipped page's box isn't printing, so it gets no image
+				break
+			}
+			l, err := doc.label(ctx, pl.Page, b, o)
+			if err != nil {
+				return &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
+			}
+			pp.LabelImages = append(pp.LabelImages, previewLabel{Image: dataURL(l.PNG), Method: l.Method,
+				PPI: int(math.Round(l.PPI)), Scale: round2(l.Scale)})
+			budget--
+			if i < len(pl.Tabs) && pl.Tabs[i] != nil && o.canvas.known() {
+				if pp.TabScales == nil {
+					pp.TabScales = make([]float64, len(pl.Boxes))
+				}
+				// the box "include" sends: both as sent, joined, rounded
+				inc := b.round4().union(pl.Tabs[i].round4()).round4()
+				sc, err := doc.labelScale(ctx, pl.Page, inc, o.canvas)
+				if err != nil {
+					return &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
+				}
+				pp.TabScales[i] = round2(sc)
+			}
+		}
+		resp.Pages = append(resp.Pages, pp)
+	}
+	return nil
+}
+
+func pdfJobName(file string, page, pages, i, n int) string {
+	name := file
+	if pages > 1 {
+		name += fmt.Sprintf(" · p%d/%d", page, pages)
+	}
+	if n > 1 {
+		name += fmt.Sprintf(" · label %d/%d", i+1, n)
+	}
+	return name
 }
 
 // ---------------------------------------------------------------- print
@@ -393,8 +555,14 @@ func (s *server) handlePrint(w http.ResponseWriter, r *http.Request) {
 	for i, j := range resp.Jobs {
 		ids[i] = j.ID
 	}
+	notes := make([]string, 0, len(reqs))
+	for _, pr := range reqs {
+		if pr.Note != "" {
+			notes = append(notes, pr.Note)
+		}
+	}
 	s.log.Info("print", "kind", up.Kind, "bytes", len(up.Data), "copies", copies, "media", media,
-		"jobs", ids, "error", errString(sendErr))
+		"labels", len(reqs), "methods", notes, "jobs", ids, "error", errString(sendErr))
 
 	if sendErr != nil {
 		if len(resp.Jobs) > 0 {
@@ -441,36 +609,76 @@ func (s *server) buildJobs(ctx context.Context, up *upload, copies int, media, u
 		return []printRequest{base}, nil
 
 	case kindPDF:
-		doc, err := s.pdf.open(ctx, up.Data)
-		if err != nil {
-			return nil, err
-		}
-		defer doc.Close()
-		pages, err := parsePageRange(up.Fields["pages"], doc.Pages)
-		if err != nil {
-			return nil, err
-		}
-		if len(pages) > s.cfg.MaxPages {
-			return nil, badRequest("that's %d pages; the limit is %d per print — pick a page range", len(pages), s.cfg.MaxPages)
-		}
-		rendered, err := doc.render(ctx, pages)
-		if err != nil {
-			return nil, &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
-		}
-		// One job per page: LPrint takes a single document per job
-		// (multiple-document-jobs-supported = false).
-		out := make([]printRequest, 0, len(rendered))
-		for _, p := range rendered {
-			pr := base
-			pr.Format, pr.Scaling, pr.Data = kindPNG.mimeType(), "fit", p.PNG
-			if doc.Pages > 1 {
-				pr.JobName = fmt.Sprintf("%s · p%d/%d", up.Filename, p.Page, doc.Pages)
-			}
-			out = append(out, pr)
-		}
-		return out, nil
+		return s.pdfJobs(ctx, up, base, media)
 	}
 	return nil, badRequest("unsupported file")
+}
+
+// tookTooLong turns any failure after a PDF request's deadline passed into
+// one clear reply, whatever poppler or the code under it made of it.
+func tookTooLong(ctx context.Context, err error) error {
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return &userError{Status: http.StatusGatewayTimeout, Msg: "that pdf took too long to prepare — try fewer pages"}
+	}
+	return err
+}
+
+// pdfJobs is buildJobs for a PDF: one job per label, within the PDF
+// request deadline.
+func (s *server) pdfJobs(ctx context.Context, up *upload, base printRequest, media string) (out []printRequest, err error) {
+	ctx, cancel := context.WithTimeout(ctx, s.pdf.deadline)
+	defer cancel()
+	defer func() { err = tookTooLong(ctx, err) }() // deferred after cancel, so it runs first
+
+	release, err := s.pdf.acquire(ctx) // held for every poppler call, pdfinfo included
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	doc, pages, err := s.openPDF(ctx, up)
+	if err != nil {
+		return nil, err
+	}
+	defer doc.Close()
+	o, err := s.labelOpts(up.Fields, doc, pages, media)
+	if err != nil {
+		return nil, err
+	}
+	// One job per label: LPrint takes a single document per job
+	// (multiple-document-jobs-supported = false). Skipped pages (no
+	// label, beside pages with one) send nothing.
+	plans, err := doc.plan(ctx, pages, o)
+	if err != nil {
+		return nil, err
+	}
+	// The preview falls back to the whole page when detection fails; print
+	// refuses instead, since what it would send (and skip) isn't what the
+	// preview showed.
+	for _, pl := range plans {
+		if pl.Failed {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return nil, &userError{Status: http.StatusUnprocessableEntity,
+				Msg: fmt.Sprintf("couldn't find the labels on page %d this time — try again, or choose whole page", pl.Page)}
+		}
+	}
+	for _, pl := range plans {
+		if pl.Skip {
+			continue
+		}
+		for i, b := range pl.Boxes {
+			l, err := doc.label(ctx, pl.Page, b, o)
+			if err != nil {
+				return nil, &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
+			}
+			pr := base
+			pr.Format, pr.Scaling, pr.Data, pr.Note = kindPNG.mimeType(), "fit", l.PNG, l.Method
+			pr.JobName = pdfJobName(up.Filename, pl.Page, doc.Pages, i, len(pl.Boxes))
+			out = append(out, pr)
+		}
+	}
+	return out, nil
 }
 
 func repeatZPL(data []byte, n int) []byte {
@@ -482,6 +690,10 @@ func repeatZPL(data []byte, n int) []byte {
 		unit = append(append([]byte(nil), unit...), '\n')
 	}
 	return bytes.Repeat(unit, n)
+}
+
+func tooManyPages(n, limit int) error {
+	return fieldError("pages", "that's %d pages; the limit is %d per print — pick a page range", n, limit)
 }
 
 func parseCopies(s string, maxCopies int) (int, error) {
@@ -521,17 +733,21 @@ func gateway(err error) error { return &gatewayError{err} }
 
 func (s *server) fail(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
+	body := map[string]string{"error": err.Error()}
 	var ue *userError
 	var ge *gatewayError
 	switch {
 	case errors.As(err, &ue):
 		status = ue.Status
+		if ue.Field != "" {
+			body["field"] = ue.Field
+		}
 	case errors.As(err, &ge):
 		status = http.StatusBadGateway
 	default:
 		s.log.Error("request failed", "error", err)
 	}
-	writeJSON(w, status, map[string]string{"error": err.Error()})
+	writeJSON(w, status, body)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

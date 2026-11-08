@@ -88,7 +88,7 @@ func main() {
 		log.Error("bad configuration", "error", err)
 		os.Exit(2)
 	}
-	s := &server{cfg: cfg, ipp: ipp, pdf: newPDFRenderer(cfg.DPI), zpl: newZPLRenderer(cfg.DPI),
+	s := &server{cfg: cfg, ipp: ipp, pdf: newPDFRenderer(cfg.DPI, log), zpl: newZPLRenderer(cfg.DPI),
 		shares: newShareStore(cfg.MaxUpload), log: log}
 
 	srv := &http.Server{

@@ -18,6 +18,9 @@ const state = {
   lastResult: null,    // { jobs, warnings } of the last print, for live updates
   maxMB: 20,
   maxCopies: 100,
+  layout: 'auto',      // label area for pdfs: auto | page
+  pdf: { pages: new Map(), media: null, labelsElsewhere: 0, meta: null },
+  previewError: null,  // a field the last preview refused (pages, crops, layout): print waits for a good one
 };
 
 // ---------------------------------------------------------------- api
@@ -44,6 +47,218 @@ function formData(extra = {}) {
   for (const [k, v] of Object.entries(extra)) fd.append(k, v);
   fd.append('file', state.file, state.file.name); // file last: fields first keeps the server's reads small
   return fd;
+}
+
+// ---------------------------------------------------------------- pdf label areas
+//
+// For PDFs the server finds label boxes on each page. The page shows them over
+// the page image; edits go back as `crops` for that page. Boxes are fractions
+// of the page as displayed: x, y, w, h from the top-left.
+
+const MIN_IN = 0.5;   // the server refuses smaller boxes
+const MAX_BOXES = 8;  // per page, as the server allows
+const NUDGE_IN = 0.05;     // arrow keys move or resize a box this far
+const NUDGE_BIG_IN = 0.25; // with shift
+const round4 = (v) => Math.round(v * 1e4) / 1e4;
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const fmtIn = (v) => String(Math.round(v * 100) / 100);
+const arrBox = (a) => ({ x: a[0], y: a[1], w: a[2], h: a[3] });
+const cloneBoxes = (bs) => bs.map((b) => ({ ...b, tab: b.tab ? { ...b.tab } : null }));
+
+// A reply already on its way was asked for with the pages being dropped, so
+// it's dropped too (preview's seq check) rather than bring them back.
+function clearEdits() {
+  state.pdf.pages = new Map();
+  state.previewSeq++;
+}
+
+function resetPdf() {
+  state.pdf = { pages: new Map(), media: null, labelsElsewhere: 0, meta: null };
+}
+
+const unionBox = (a, b) => {
+  const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y);
+  return { x, y, w: Math.max(a.x + a.w, b.x + b.w) - x, h: Math.max(a.y + a.h, b.y + b.h) - y };
+};
+
+// growBox is b grown to at least MIN_IN each side, centred on it and kept on
+// the page, so the server accepts a doc tab printed on its own.
+function growBox(b, pg) {
+  const w = Math.min(1, Math.max(b.w, MIN_IN / pg.widthIn));
+  const h = Math.min(1, Math.max(b.h, MIN_IN / pg.heightIn));
+  return { x: clamp(b.x + b.w / 2 - w / 2, 0, 1 - w), y: clamp(b.y + b.h / 2 - h / 2, 0, 1 - h), w, h };
+}
+
+const separate = (b) => !!b.tab && b.choice === 'separate';
+
+// flatBoxes is what a page prints, in order: each box, its doc tab as chosen
+// (included in it, or right after it as its own label). A skipped page (no
+// label found while other pages have one) prints nothing until it's included.
+function flatBoxes(pg) {
+  if (pg.skipped && !pg.edited) return [];
+  const out = [];
+  for (const b of pg.boxes) {
+    out.push(b.tab && b.choice === 'include' ? unionBox(b, b.tab) : b);
+    if (separate(b)) out.push(growBox(b.tab, pg));
+  }
+  return out;
+}
+
+// labelNumbers gives each box the number its label prints as (a doc tab
+// printed separately takes the next one), so the badge on the page and the
+// caption beside it agree.
+function labelNumbers(pg) {
+  let k = 0;
+  return pg.boxes.map((b) => {
+    const n = ++k;
+    if (separate(b)) k++;
+    return n;
+  });
+}
+
+// A detected or fallback box can be under MIN_IN (a skipped page holding one
+// line of text, a small label's box once its page is edited): each box is
+// grown to it before sending, since the server refuses smaller crops.
+function cropsField() {
+  const out = {};
+  for (const pg of state.pdf.pages.values()) {
+    if (!pg.edited || !pg.boxes.length) continue;
+    out[pg.page] = flatBoxes(pg).map((b) => growBox(b, pg)).map((b) => [b.x, b.y, b.w, b.h].map(round4));
+  }
+  return Object.keys(out).length ? JSON.stringify(out) : '';
+}
+
+// requestFields are the form fields both preview and print send.
+function requestFields() {
+  const f = { pages: $('pages').value, media: $('media').value, layout: state.layout };
+  const crops = cropsField();
+  if (crops) f.crops = crops;
+  return f;
+}
+
+// absorbPdf takes a preview reply, keeping the boxes of pages the user edited.
+// An edited page also keeps what detection said about it (auto, fallback,
+// skipped), since the reply describes the crops sent; reset goes back to that.
+function absorbPdf(r) {
+  state.pdf.media = r.widthIn ? { w: r.widthIn, h: r.heightIn } : null;
+  state.pdf.meta = { selected: r.selected, pageCount: r.pageCount };
+  const old = state.pdf.pages;
+  const next = new Map();
+  let shownLabels = 0;
+  for (const p of r.pages || []) {
+    const fresh = (p.boxes || []).map((a, i) => ({
+      ...arrBox(a), autoIndex: i, tab: p.tabs?.[i] ? arrBox(p.tabs[i]) : null, choice: 'off',
+      tabScale: p.tabScales?.[i] || null, // the server's scale for "include"
+    }));
+    const prev = old.get(p.page);
+    const edited = !!prev?.edited;
+    const pg = {
+      page: p.page, image: p.image, widthIn: p.widthIn, heightIn: p.heightIn,
+      auto: edited ? prev.auto : !!p.auto,
+      fallback: edited ? prev.fallback : !!p.fallback,
+      skipped: edited ? prev.skipped : !!p.skipped,
+      labelImages: p.labelImages || [],
+      edited,
+      boxes: edited ? prev.boxes : fresh,
+      autoBoxes: edited ? prev.autoBoxes : cloneBoxes(fresh),
+    };
+    if (!p.skipped) shownLabels += fresh.length;
+    next.set(p.page, pg);
+  }
+  // labels on pages past the preview cap, which the page doesn't hold
+  state.pdf.labelsElsewhere = (r.labels || 0) - shownLabels;
+  state.pdf.pages = next;
+}
+
+function pdfLabelCount() {
+  let n = state.pdf.labelsElsewhere;
+  for (const pg of state.pdf.pages.values()) n += flatBoxes(pg).length;
+  return n;
+}
+
+// Pages the user left with no boxes. A skipped page isn't one: it prints
+// nothing on purpose.
+function emptyPages() {
+  return [...state.pdf.pages.values()].filter((pg) => pg.edited && !pg.boxes.length);
+}
+
+// Whether pg is the page on screen. Changing the page range (or size, or
+// layout) drops the pages before the reply that replaces them lands, so until
+// then the boxes on screen belong to no page and edits to them are ignored.
+const live = (pg) => state.pdf.pages.get(pg.page) === pg;
+
+// An edit to a page: draw it, recount, and re-preview with its crops.
+// Until the new reply lands the page's label images are the old boxes', so
+// they're shown dimmed and captioned as updating (absorbPdf makes pages anew).
+// A page left with no boxes isn't sent, so there's nothing to re-preview.
+function markEdited(pg) {
+  pg.edited = true;
+  pg.stale = true;
+  renderPdf();
+  updateSummary();
+  if (pg.boxes.length) schedulePreview();
+}
+
+// A moved or resized box no longer matches its detected doc tab: its choice
+// goes, and the tab stays outlined (left off) until the page is reset.
+function boxChanged(pg, b) {
+  if (b.tab) {
+    b.oldTab = b.tab;
+    b.tab = null;
+    b.choice = 'off';
+  }
+  markEdited(pg);
+}
+
+// Focus moves to the box that took the removed one's place, or to "add label"
+// when none is left, so the keyboard isn't dropped back at the top.
+function removeBox(pg, b) {
+  if (!live(pg)) return;
+  const i = pg.boxes.indexOf(b);
+  pg.boxes = pg.boxes.filter((x) => x !== b);
+  markEdited(pg);
+  if (!focusBox(pg, Math.min(i, pg.boxes.length - 1))) focusTool(pg, 'add');
+}
+
+// A centred box the size of the label, turned to the page's orientation and
+// shrunk to fit it; half the page each way when the label size is unknown.
+// On a skipped page the whole-page box wasn't printing, so the new box
+// replaces it rather than joining it.
+function addBox(pg) {
+  if (!live(pg)) return;
+  const m = state.pdf.media;
+  let w = 0.5, h = 0.5;
+  if (m) {
+    let mw = m.w, mh = m.h;
+    if ((pg.widthIn > pg.heightIn) !== (mw > mh)) [mw, mh] = [mh, mw];
+    const fit = Math.min(1, pg.widthIn / mw, pg.heightIn / mh);
+    w = (mw * fit) / pg.widthIn;
+    h = (mh * fit) / pg.heightIn;
+  }
+  if (pg.skipped && !pg.edited) pg.boxes = [];
+  pg.boxes.push({ x: (1 - w) / 2, y: (1 - h) / 2, w, h, autoIndex: null, tab: null, choice: 'off' });
+  markEdited(pg);
+  focusBox(pg, pg.boxes.length - 1);
+}
+
+// The doc tab's choice: leave it off, include it in its label's box, or print
+// it right after as its own label. It belongs to the box object, so other
+// boxes keep theirs when a tab box is inserted.
+function setChoice(pg, b, choice) {
+  if (b.choice === choice || !live(pg)) return;
+  b.choice = choice;
+  markEdited(pg);
+}
+
+// Drop a page's edits and go back to what detection found.
+function resetPage(pg) {
+  if (!live(pg)) return;
+  pg.edited = false;
+  pg.stale = true;
+  pg.boxes = cloneBoxes(pg.autoBoxes);
+  renderPdf();
+  updateSummary();
+  schedulePreview();
 }
 
 // ---------------------------------------------------------------- printer
@@ -106,6 +321,10 @@ function chooseFile(file) {
   state.objectURL = null;
   state.file = file;
   state.kind = null;
+  state.previewError = null;
+  resetPdf();
+  state.layout = 'auto';
+  document.querySelector('input[name="layout"][value="auto"]').checked = true;
   $('drop').classList.toggle('has-file', !!file);
   $('file-row').hidden = !file;
   $('pages').value = '';
@@ -113,6 +332,7 @@ function chooseFile(file) {
     $('file').value = '';
     $('preview').hidden = true;
     $('pages-field').hidden = true;
+    $('layout-field').hidden = true;
     setMediaHint(null);
     updateSummary();
     return;
@@ -135,12 +355,6 @@ function setMediaHint(kind) {
   $('media-hint').textContent = kind === 'zpl' ? 'for the preview — the zpl sets the printed size' : '';
 }
 
-let pagesTimer;
-$('pages').addEventListener('input', () => {
-  clearTimeout(pagesTimer);
-  pagesTimer = setTimeout(preview, 450);
-});
-
 async function preview() {
   if (!state.file) return;
   const seq = ++state.previewSeq;
@@ -149,14 +363,26 @@ async function preview() {
   $('pages').removeAttribute('aria-invalid');
   let r;
   try {
-    r = await api('/api/preview', { method: 'POST', body: formData({ pages: $('pages').value, media: $('media').value }) });
+    r = await api('/api/preview', { method: 'POST', body: formData(requestFields()) });
   } catch (e) {
     if (seq !== state.previewSeq) return;
     box.classList.remove('loading');
-    if (state.kind === 'pdf' && /page/i.test(e.message)) {
+    const field = e.body?.field;
+    if (field) state.previewError = e.message;
+    // The range, size or layout changed, so the pages on screen are gone from
+    // state: take them away rather than leave boxes that edit nothing.
+    if (field && state.kind === 'pdf' && !state.pdf.pages.size) {
+      $('preview-grid').replaceChildren();
+      $('preview-note').textContent = '';
+    }
+    if (field === 'pages') {
       // a bad page range: keep the file, flag the field
       $('pages').setAttribute('aria-invalid', 'true');
       $('pages-hint').textContent = e.message;
+    } else if (field === 'crops' || field === 'layout') {
+      const note = $('preview-note');
+      note.textContent = e.message;
+      note.classList.add('err');
     } else {
       state.kind = null;
       $('file-kind').textContent = 'rejected';
@@ -168,32 +394,35 @@ async function preview() {
     return;
   }
   if (seq !== state.previewSeq) return;
-  box.classList.remove('loading');
+  if (dragging) { heldPreview = { r, seq }; return; }
+  showPreview(r);
+}
+
+function showPreview(r) {
+  state.previewError = null;
+  $('preview').classList.remove('loading');
   $('pages-hint').textContent = 'e.g. 1-3, 5';
   state.kind = r.kind;
   $('file-kind').textContent = r.kind;
   $('file-kind').className = 'badge badge-accent';
   $('pages-field').hidden = r.kind !== 'pdf';
+  $('layout-field').hidden = r.kind !== 'pdf';
   setMediaHint(r.kind);
   renderPreview(r);
-  updateSummary(r);
+  updateSummary();
 }
 
 function renderPreview(r) {
   const grid = $('preview-grid');
   const note = $('preview-note');
-  grid.replaceChildren();
+  if (r.kind !== 'pdf') grid.replaceChildren(); // renderPdf swaps the pages itself, keeping focus
+  grid.classList.toggle('pdf-mode', r.kind === 'pdf');
+  note.classList.remove('err');
   document.querySelector('.zpl-source')?.remove();
   $('preview').hidden = false;
   if (r.kind === 'pdf') {
-    const shown = r.pages.length;
-    note.textContent = `${r.selected} of ${r.pageCount} page${r.pageCount === 1 ? '' : 's'} selected · ` +
-      `rendered at 203 dpi, grayscale` + (r.selected > shown ? ` · showing the first ${shown}` : '');
-    for (const p of r.pages) {
-      grid.append(el('figure', { className: 'preview-item' },
-        el('img', { src: p.image, alt: `page ${p.page}`, loading: 'lazy' }),
-        el('figcaption', { textContent: `p${p.page}` })));
-    }
+    absorbPdf(r);
+    renderPdf();
   } else if (r.kind === 'png' || r.kind === 'jpeg') {
     state.objectURL = URL.createObjectURL(state.file);
     note.textContent = 'scaled to fit the label';
@@ -218,6 +447,339 @@ function renderPreview(r) {
   }
 }
 
+function renderPdf() {
+  const grid = $('preview-grid');
+  const note = $('preview-note');
+  const a = document.activeElement;
+  const fig = a?.dataset?.tool ? a.closest('.pdf-page') : null;
+  const focus = fig ? { page: fig.dataset.page, tool: a.dataset.tool } : null;
+  const crop = a?.closest?.('.crop');
+  const focusCrop = crop ? { page: crop.dataset.page, index: crop.dataset.index, del: a !== crop } : null;
+  const { selected, pageCount } = state.pdf.meta;
+  const shown = state.pdf.pages.size;
+  const n = pdfLabelCount();
+  const m = state.pdf.media;
+  note.textContent = `${selected} of ${pageCount} page${pageCount === 1 ? '' : 's'} · ${n} label${n === 1 ? '' : 's'}` +
+    (m ? ` · black and white, sized for ${fmtIn(m.w)} × ${fmtIn(m.h)} in` : '') +
+    (selected > shown ? ` · showing the first ${shown} pages` : '');
+  grid.replaceChildren(...[...state.pdf.pages.values()].map(pageFigure));
+  if (focus) focusTool({ page: focus.page }, focus.tool);
+  if (focusCrop) focusBox({ page: focusCrop.page }, focusCrop.index, focusCrop.del);
+}
+
+function pageCaption(pg) {
+  const n = pg.boxes.length;
+  if (pg.edited) {
+    const k = flatBoxes(pg).length;
+    return `p${pg.page} · ${k} label area${k === 1 ? '' : 's'}, edited`;
+  }
+  if (pg.skipped) return `p${pg.page} · no label found, not printing`;
+  if (pg.fallback) return `p${pg.page} · no label found, using the whole page`;
+  if (pg.auto) return `p${pg.page} · ${n} label${n === 1 ? '' : 's'} found`;
+  return `p${pg.page} · whole page`;
+}
+
+function pageFigure(pg) {
+  const skipped = pg.skipped && !pg.edited;
+  const stage = el('div', { className: 'page-stage' },
+    el('img', { src: pg.image, alt: `page ${pg.page}`, draggable: false }));
+  stage.style.aspectRatio = `${pg.widthIn} / ${pg.heightIn}`;
+  const nums = labelNumbers(pg);
+  pg.boxes.forEach((b, i) => {
+    if (b.tab || b.oldTab) stage.append(tabOutline(pg, b, i, nums[i]));
+    const node = boxEl(pg, b, i, nums[i]);
+    if (skipped) node.classList.add('skipped');
+    stage.append(node);
+  });
+  const tools = el('div', { className: 'page-tools' }, el('span', { className: 'caption', textContent: pageCaption(pg) }));
+  if (skipped) {
+    const include = el('button', { type: 'button', className: 'btn btn-ghost btn-sm', textContent: 'include' });
+    include.setAttribute('aria-label', `include page ${pg.page}: print it as a label`);
+    include.dataset.tool = 'include';
+    include.addEventListener('click', () => { if (!live(pg)) return; pg.edited = true; markEdited(pg); focusTool(pg, 'reset'); });
+    tools.append(include);
+  }
+  const add = el('button', { type: 'button', className: 'btn btn-ghost btn-sm', textContent: 'add label' });
+  add.setAttribute('aria-label', `add a label area to page ${pg.page}`);
+  add.dataset.tool = 'add';
+  add.disabled = flatBoxes(pg).length >= MAX_BOXES;
+  if (add.disabled) add.title = `${MAX_BOXES} label areas is the most a page can have`;
+  add.addEventListener('click', () => addBox(pg));
+  tools.append(add);
+  if (pg.edited) {
+    const reset = el('button', { type: 'button', className: 'btn btn-ghost btn-sm', textContent: 'reset' });
+    reset.setAttribute('aria-label', `reset page ${pg.page}`);
+    reset.dataset.tool = 'reset';
+    reset.addEventListener('click', () => { resetPage(pg); if (!focusTool(pg, 'include')) focusTool(pg, 'add'); });
+    tools.append(reset);
+  }
+  if (!pg.boxes.length) tools.append(el('span', { className: 'badge badge-warning', textContent: 'no labels' }));
+  const fig = el('figure', { className: 'pdf-page' },
+    el('div', { className: 'page-col' }, stage, tools),
+    el('div', { className: 'labels-col' }, ...labelFigures(pg)));
+  fig.dataset.page = pg.page;
+  return fig;
+}
+
+// The page is redrawn on every change, so a button that swaps for another
+// (include ↔ reset) hands keyboard focus to its replacement.
+function focusTool(pg, tool) {
+  return focusEl($('preview-grid').querySelector(`.pdf-page[data-page="${pg.page}"] [data-tool="${tool}"]`));
+}
+
+// the box itself, or its × button
+function focusBox(pg, i, del = false) {
+  const sel = `.crop[data-page="${pg.page}"][data-index="${i}"]` + (del ? ' .crop-del' : '');
+  return focusEl($('preview-grid').querySelector(sel));
+}
+
+function focusEl(node) {
+  if (!node || node.disabled) return false;
+  node.focus();
+  return true;
+}
+
+function place(node, b) {
+  Object.assign(node.style, { left: `${b.x * 100}%`, top: `${b.y * 100}%`, width: `${b.w * 100}%`, height: `${b.h * 100}%` });
+}
+
+// A box: drag it to move it, drag a corner to resize it, × to remove it.
+// Focused, arrow keys nudge it, alt+arrow resizes it from the bottom-right
+// corner, delete removes it. On a skipped page (shown, not printing) a move or
+// resize includes the page, like "include" and then the edit; it has no × since
+// there is nothing printing to take away.
+function boxEl(pg, b, i, num) {
+  const skipped = pg.skipped && !pg.edited;
+  const node = el('div', { className: 'crop', tabIndex: 0 });
+  node.dataset.page = pg.page;
+  node.dataset.index = i;
+  node.setAttribute('role', 'group');
+  const size = `${fmtIn(b.w * pg.widthIn)} × ${fmtIn(b.h * pg.heightIn)} in`;
+  const tab = !b.tab ? '' : `, doc tab ${{ off: 'left off', include: 'included', separate: `printed as label ${num + 1}` }[b.choice]}`;
+  node.setAttribute('aria-label', skipped
+    ? `label area ${num} on page ${pg.page}, ${size}, not printing: move or resize it to include the page`
+    : `label area ${num} on page ${pg.page}, ${size}${tab}: drag or arrow keys to move, ` +
+      'corners or alt+arrow keys to resize, delete to remove');
+  place(node, b);
+  node.append(el('span', { className: 'crop-num', textContent: num }));
+  for (const corner of ['nw', 'ne', 'sw', 'se']) {
+    const h = el('span', { className: 'crop-handle' });
+    h.dataset.corner = corner;
+    node.append(h);
+  }
+  if (!skipped) {
+    const del = el('button', { type: 'button', className: 'crop-del', textContent: '×' });
+    del.setAttribute('aria-label', `remove label area ${num} from page ${pg.page}`);
+    del.addEventListener('pointerdown', (e) => e.stopPropagation());
+    del.addEventListener('click', () => removeBox(pg, b));
+    node.append(del);
+  }
+  node.addEventListener('pointerdown', (e) => startDrag(e, pg, b, node, e.target.dataset?.corner || null));
+  node.addEventListener('keydown', (e) => keyBox(e, pg, b, node));
+  return node;
+}
+
+// A preview reply that lands mid-drag is held until the drag ends: redrawing
+// would swap the box being dragged for a new node and end the drag.
+let dragging = false;
+let heldPreview = null;
+
+function startDrag(e, pg, b, node, corner) {
+  if (e.button !== 0 || dragging || !live(pg)) return;
+  e.preventDefault();
+  node.focus();
+  const stage = node.parentElement.getBoundingClientRect();
+  const o = { ...b };
+  const mw = MIN_IN / pg.widthIn;
+  const mh = MIN_IN / pg.heightIn;
+  let moved = false;
+  dragging = true;
+  node.setPointerCapture(e.pointerId);
+  const move = (ev) => {
+    if (ev.pointerId !== e.pointerId) return;
+    moved ||= Math.abs(ev.clientX - e.clientX) + Math.abs(ev.clientY - e.clientY) > 2;
+    if (!moved) return; // a click, not a drag
+    const dx = (ev.clientX - e.clientX) / stage.width;
+    const dy = (ev.clientY - e.clientY) / stage.height;
+    if (!corner) {
+      b.x = clamp(o.x + dx, 0, 1 - o.w);
+      b.y = clamp(o.y + dy, 0, 1 - o.h);
+    } else {
+      let x0 = o.x, y0 = o.y, x1 = o.x + o.w, y1 = o.y + o.h;
+      if (corner.includes('w')) x0 = clamp(x0 + dx, 0, x1 - mw); else x1 = clamp(x1 + dx, x0 + mw, 1);
+      if (corner.includes('n')) y0 = clamp(y0 + dy, 0, y1 - mh); else y1 = clamp(y1 + dy, y0 + mh, 1);
+      Object.assign(b, { x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+    }
+    place(node, b);
+  };
+  // pointerup commits; pointercancel (the browser took the pointer) puts the
+  // box back; losing capture any other way commits what was dragged.
+  const end = (ev) => {
+    if (ev.pointerId !== e.pointerId) return;
+    node.removeEventListener('pointermove', move);
+    node.removeEventListener('pointerup', end);
+    node.removeEventListener('pointercancel', end);
+    node.removeEventListener('lostpointercapture', end);
+    if (node.hasPointerCapture(e.pointerId)) node.releasePointerCapture(e.pointerId);
+    if (ev.type === 'pointercancel' && moved) {
+      Object.assign(b, o);
+      place(node, b);
+      moved = false;
+    }
+    dragging = false;
+    const held = heldPreview;
+    heldPreview = null;
+    if (moved) boxChanged(pg, b); // re-previews, superseding the held reply
+    else if (held?.seq === state.previewSeq) showPreview(held.r);
+  };
+  node.addEventListener('pointermove', move);
+  node.addEventListener('pointerup', end);
+  node.addEventListener('pointercancel', end);
+  node.addEventListener('lostpointercapture', end);
+}
+
+function keyBox(e, pg, b, node) {
+  if (e.target !== node || !live(pg)) return; // keys on the × are the button's
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    e.preventDefault();
+    if (!(pg.skipped && !pg.edited)) removeBox(pg, b);
+    return;
+  }
+  const step = e.shiftKey ? NUDGE_BIG_IN : NUDGE_IN;
+  const dx = { ArrowLeft: -step, ArrowRight: step }[e.key] || 0;
+  const dy = { ArrowUp: -step, ArrowDown: step }[e.key] || 0;
+  if (!dx && !dy) return;
+  e.preventDefault();
+  const was = [b.x, b.y, b.w, b.h];
+  if (e.altKey) {
+    b.w = clamp(b.w + dx / pg.widthIn, Math.min(b.w, MIN_IN / pg.widthIn), 1 - b.x);
+    b.h = clamp(b.h + dy / pg.heightIn, Math.min(b.h, MIN_IN / pg.heightIn), 1 - b.y);
+  } else {
+    b.x = clamp(b.x + dx / pg.widthIn, 0, 1 - b.w);
+    b.y = clamp(b.y + dy / pg.heightIn, 0, 1 - b.h);
+  }
+  if ([b.x, b.y, b.w, b.h].some((v, k) => v !== was[k])) boxChanged(pg, b);
+}
+
+// A detected doc tab: dashed while left off, solid once it prints. Printed
+// separately it is a label of its own, so it gets that label's number and an
+// × that leaves it off again. A tab whose box was moved (oldTab) stays dashed.
+function tabOutline(pg, b, i, num) {
+  const node = el('div', { className: 'crop-tab' + (b.choice === 'off' ? '' : ' on'), title: 'doc tab' });
+  place(node, b.tab || b.oldTab);
+  if (separate(b)) {
+    // a tab is often a narrow strip: stack the number and × along it
+    if (b.tab.h * pg.heightIn > b.tab.w * pg.widthIn) node.classList.add('tall');
+    node.append(el('span', { className: 'crop-num', textContent: num + 1 }));
+    const del = el('button', { type: 'button', className: 'crop-del', textContent: '×' });
+    del.setAttribute('aria-label', `stop printing the doc tab of label ${num} on its own (label ${num + 1}, page ${pg.page})`);
+    del.addEventListener('click', () => { setChoice(pg, b, 'off'); focusBox(pg, i); });
+    node.append(del);
+  }
+  return node;
+}
+
+// What shrinking a label to fit does to its barcodes. Carriers ask for true
+// size; a 15 mil module at 87% is 13 mil, the USPS floor.
+const SCALE_WARN = 0.95;
+const SCALE_BAD = 0.87;
+function scaleNote(scale, advice = '; check the label box or the label size') {
+  if (!(scale < SCALE_WARN)) return '';
+  const pct = Math.round(scale * 100);
+  return scale < SCALE_BAD
+    ? ` · scaled to ${pct}% — barcodes likely won't scan${advice}`
+    : ` · scaled to ${pct}%, barcodes may not scan`;
+}
+
+// What "include" would scale the label and its tab to, together: rendered to
+// fit the label size, never enlarged. The preview sends the server's own
+// figure (tabScale); this is for a label past the preview's cap. It fits the
+// boxes, padding and all, where the server fits their ink, so it comes out a
+// little low: shown as "about", it errs toward the stronger warning.
+function includeScale(pg, b) {
+  const m = state.pdf.media;
+  if (!m) return 1;
+  const u = unionBox(b, b.tab);
+  let w = u.w * pg.widthIn, h = u.h * pg.heightIn;
+  if ((w > h) !== (m.w > m.h)) [w, h] = [h, w];
+  return Math.min(1, m.w / w, m.h / h);
+}
+
+// The segmented leave off / include / print separately control under a label
+// with a doc tab (li is that label's image, while the preview is current).
+// Buttons carry data-tool so focus survives the redraw a choice makes. "Print
+// separately" can't take the page past MAX_BOXES; it stays focusable
+// (aria-disabled) so the reason beside it is read out.
+function tabChoice(pg, b, num, li) {
+  const id = `tab-${pg.page}-${b.autoIndex}`;
+  const seg = el('div', { className: 'seg seg-sm', role: 'group' });
+  seg.setAttribute('aria-label', `doc tab of label ${num}`);
+  // the server's figure: once included and rendered, the label's own
+  const exact = b.choice === 'include' && li ? li.scale : b.tabScale;
+  const scale = exact || includeScale(pg, b);
+  const pct = `${exact ? '' : 'about '}${Math.round(scale * 100)}%`;
+  const full = !separate(b) && flatBoxes(pg).length + 1 > MAX_BOXES;
+  const hints = [];
+  const hint = (key, text, warn) => {
+    const p = el('p', { className: 'hint' + (warn ? ' warn' : ''), id: `${id}-${key}`, textContent: text });
+    hints.push(p);
+    return p.id;
+  };
+  for (const [v, text] of [['off', 'leave off'], ['include', state.pdf.media ? `include · scaled to ${pct}` : 'include'], ['separate', 'print separately']]) {
+    const btn = el('button', { type: 'button', textContent: text });
+    btn.dataset.tool = `${id}-${v}`;
+    btn.setAttribute('aria-pressed', String(b.choice === v));
+    // the label's own caption says it once included, from the server's render
+    if (v === 'include' && b.choice !== 'include' && scale < SCALE_WARN) {
+      btn.setAttribute('aria-describedby', hint('scale', `include${scaleNote(scale, TAB_ADVICE)}`, true));
+    }
+    if (v === 'separate' && full) {
+      btn.setAttribute('aria-disabled', 'true');
+      btn.setAttribute('aria-describedby', hint('full', `print separately: a page holds at most ${MAX_BOXES} labels`));
+    }
+    btn.addEventListener('click', () => { if (btn.getAttribute('aria-disabled') !== 'true') setChoice(pg, b, v); });
+    seg.append(btn);
+  }
+  return el('div', { className: 'tab-choice' }, el('span', { className: 'caption', textContent: 'doc tab' }), seg, ...hints);
+}
+
+const TAB_ADVICE = '; leave the doc tab off or print it separately';
+
+function labelNote(li, advice) {
+  if (!li) return 'not previewed';
+  if (li.method === 'native') return `original ${li.ppi} dpi bitmap, unscaled`;
+  const m = state.pdf.media;
+  return (m ? `rendered for ${fmtIn(m.w)} × ${fmtIn(m.h)} in` : 'rendered') + scaleNote(li.scale, advice);
+}
+
+// The labels a page makes, in print order. A box with a doc tab carries the
+// tab choice under its label; a tab printed separately follows as its own.
+function labelFigures(pg) {
+  const total = flatBoxes(pg).length;
+  if (!total) return []; // nothing printing (a skipped page, or every box removed)
+  const figs = [];
+  let k = 0;
+  for (const b of pg.boxes) {
+    const num = k + 1;
+    const included = !!b.tab && b.choice === 'include';
+    const suffixes = separate(b) ? ['', ' · doc tab'] : [included ? ' · with doc tab' : ''];
+    suffixes.forEach((suffix, j) => {
+      const li = pg.stale ? null : pg.labelImages[k];
+      const old = pg.stale && pg.labelImages[k];
+      const name = `label ${k + 1}${total > 1 ? `/${total}` : ''}${suffix}`;
+      const fig = el('figure', { className: 'preview-item label-item' + (old ? ' stale' : '') });
+      if (li || old) fig.append(el('img', { src: (li || old).image, alt: name, loading: 'lazy' }));
+      const cap = el('figcaption', { textContent: `${name} · ${pg.stale ? 'updating…' : labelNote(li, included ? TAB_ADVICE : undefined)}` });
+      if (li && li.scale < SCALE_WARN) cap.classList.add('warn');
+      fig.append(cap);
+      if (j === 0 && b.tab) fig.append(tabChoice(pg, b, num, li));
+      figs.push(fig);
+      k++;
+    });
+  }
+  return figs;
+}
+
 // the zpl itself, collapsed unless there's no picture to look at
 function zplSource(open) {
   const pre = el('pre', { className: 'preview-zpl', tabIndex: 0 });
@@ -228,31 +790,54 @@ function zplSource(open) {
   });
 }
 
-function updateSummary(r) {
+function updateSummary() {
   const btn = $('print');
-  const copies = parseInt($('copies').value, 10);
+  const copies = wholeCopies($('copies').value);
   const copiesOK = copies >= 1 && copies <= state.maxCopies;
   if (copiesOK) $('copies').removeAttribute('aria-invalid');
   else $('copies').setAttribute('aria-invalid', 'true');
-  btn.disabled = !state.kind || !copiesOK;
+  const empty = state.kind === 'pdf' ? emptyPages() : [];
+  btn.disabled = !state.kind || !copiesOK || empty.length > 0 || !!state.previewError;
   const sum = $('summary');
   if (!state.file) { sum.textContent = 'choose a file to start'; return; }
   if (!state.kind) { sum.textContent = ''; return; }
-  if (!copiesOK) { sum.textContent = `copies: 1 to ${state.maxCopies}`; return; }
+  if (state.previewError) { sum.textContent = state.previewError; return; }
+  if (!copiesOK) { sum.textContent = `copies: a whole number, 1 to ${state.maxCopies}`; return; }
   let units = 1;
-  let what = 'label';
-  if (state.kind === 'pdf') {
-    units = r?.selected ?? state.lastSelected ?? 1;
-    state.lastSelected = units;
-    what = 'page';
-  }
+  if (state.kind === 'pdf') units = pdfLabelCount();
   const total = units * copies;
+  if (empty.length) {
+    sum.textContent = `page ${empty[0].page} has no labels — add one, reset it, or leave it out of the page range`;
+    return;
+  }
   sum.textContent = copies > 1 && units > 1
-    ? `${units} ${what}s × ${copies} copies = ${total} labels`
+    ? `${units} labels × ${copies} copies = ${total} labels`
     : `${total} label${total === 1 ? '' : 's'}`;
 }
 $('copies').addEventListener('input', () => updateSummary());
-$('media').addEventListener('change', () => { if (state.kind === 'zpl') preview(); });
+
+// Scheduling a preview makes any reply still on its way out of date: it was
+// asked for before this edit, and showing it would draw the old boxes' labels
+// as current (and clear "updating…") until the new reply lands.
+let previewTimer;
+function schedulePreview() {
+  state.previewSeq++;
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(preview, 450);
+}
+// the boxes on screen stop being editable at once (see live): dim them until the reply
+$('pages').addEventListener('input', () => {
+  clearEdits();
+  if (state.kind === 'pdf') $('preview').classList.add('loading');
+  schedulePreview();
+});
+$('media').addEventListener('change', () => {
+  if (state.kind === 'pdf') clearEdits();
+  if (state.kind === 'zpl' || state.kind === 'pdf') preview();
+});
+for (const radio of document.querySelectorAll('input[name="layout"]')) {
+  radio.addEventListener('change', () => { state.layout = radio.value; clearEdits(); preview(); });
+}
 
 // ---------------------------------------------------------------- drag and drop
 
@@ -281,8 +866,8 @@ $('form').addEventListener('submit', async (e) => {
   btn.disabled = true;
   btn.textContent = 'printing…';
   showResult('info', state.kind === 'pdf' ? 'rendering and sending to lprint…' : 'sending to lprint…');
-  const fields = { copies: $('copies').value, pages: $('pages').value };
-  if (state.kind !== 'zpl') fields.media = $('media').value;
+  const fields = { ...requestFields(), copies: $('copies').value };
+  if (state.kind === 'zpl') delete fields.media;
   try {
     const r = await api('/api/print', { method: 'POST', body: formData(fields) });
     r.jobs.forEach((j) => state.mine.add(j.id));

@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -53,22 +56,49 @@ func makeLabelPDF(n int) []byte {
 	return out.Bytes()
 }
 
-// The CI image smoke test posts testdata/label-2page.pdf; keep it in sync with
-// the generator. Regenerate with UPDATE_FIXTURES=1 go test -run Fixture.
+// The CI image smoke test posts these files; keep them in sync with their
+// generators. Regenerate with UPDATE_FIXTURES=1 go test -run Fixture.
 func TestFixtureUpToDate(t *testing.T) {
-	want := makeLabelPDF(2)
-	const path = "testdata/label-2page.pdf"
-	if os.Getenv("UPDATE_FIXTURES") == "1" {
-		if err := os.WriteFile(path, want, 0o644); err != nil {
+	for path, gen := range map[string]func() []byte{
+		"testdata/label-2page.pdf": func() []byte { return makeLabelPDF(2) },
+		"testdata/ups-2up.pdf":     func() []byte { return fixUPS2up(true, 200) },
+	} {
+		want := gen()
+		if os.Getenv("UPDATE_FIXTURES") == "1" {
+			if err := os.WriteFile(path, want, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
 			t.Fatal(err)
 		}
+		if !bytes.Equal(got, want) {
+			t.Errorf("%s is stale; run UPDATE_FIXTURES=1 go test -run Fixture", path)
+		}
 	}
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+}
+
+// FIXTURE_DIR=/some/dir go test -run WriteFixtures writes every fixture there,
+// for trying the page by hand. They're synthetic: no real labels.
+func TestWriteFixtures(t *testing.T) {
+	dir := os.Getenv("FIXTURE_DIR")
+	if dir == "" {
+		t.Skip("set FIXTURE_DIR")
 	}
-	if !bytes.Equal(got, want) {
-		t.Fatalf("%s is stale; run UPDATE_FIXTURES=1 go test -run Fixture", path)
+	for name, pdf := range map[string][]byte{
+		"01-label-beside-text.pdf": fixLabelBesideText(), "02-ups-2up.pdf": fixUPS2up(true, 200),
+		"03-hairline.pdf": fixHairline(), "04-2up.pdf": fix2up(), "05-wide.pdf": fixWide(),
+		"06-text-only.pdf": fixTextOnly(), "07-stamped.pdf": fixStamped(),
+		"08-return-blank-tab.pdf": fixReturn(0, 206, 196), "09-clipped-tab.pdf": fixClippedTab(),
+		"10-ups-300ppi.pdf": fixUPS2up(false, 300), "11-return-tab.pdf": fixReturn(1340, 206, 196),
+		"12-return-tab-193.pdf": fixReturn(1395, 193, 193), "13-band.pdf": fixBand(),
+		"14-label-then-text.pdf": fixLabelThenText(), "15-small-label.pdf": fixSmallLabel(),
+		"16-framed-tab-first.pdf": fixFramedTabFirst(), "17-label-then-one-line.pdf": fixLabelThenOneLine(),
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), pdf, 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -94,4 +124,22 @@ func (b *ippResponseBuilder) mustBytes(t testing.TB) []byte {
 		t.Fatal(err)
 	}
 	return out
+}
+
+var discardLog = slog.New(slog.DiscardHandler)
+
+// shimTool puts a shell script named tool first on PATH for the rest of the
+// test. The script can run the real tool as "$REAL" "$@".
+func shimTool(t *testing.T, tool, script string) {
+	t.Helper()
+	real, err := exec.LookPath(tool)
+	if err != nil {
+		t.Skipf("%s not installed", tool)
+	}
+	dir := t.TempDir()
+	body := fmt.Sprintf("#!/bin/sh\nREAL='%s'\n%s\n", real, script)
+	if err := os.WriteFile(filepath.Join(dir, tool), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
