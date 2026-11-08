@@ -15,7 +15,7 @@ example stack. The repo is public: keep real hostnames, addresses and deployment
 
 | file | role |
 |---|---|
-| `ipp.go` | hand-written IPP/2.0 encoder/decoder and the three operations used: Print-Job, Get-Printer-Attributes, Get-Jobs |
+| `ipp.go` | hand-written IPP/2.0 encoder/decoder and the four operations used: Print-Job, Cancel-Job, Get-Printer-Attributes, Get-Jobs |
 | `detect.go` | content sniffing (PDF/PNG/JPEG magic, ZPL by `.zpl` or `^XA…^XZ`), page-range parsing |
 | `render.go` | `pdfinfo` + `pdftoppm` wrapper; one call per page, scratch files on the `/tmp` tmpfs |
 | `zpl.go` | ZPL preview via zebrash (the only module dependency): panic recovery, timeout, canvas from `^PW`/`^LL` or the media |
@@ -38,6 +38,10 @@ Verified against the live LPrint (Get-Printer-Attributes) and the LPrint/PAPPL s
   it. A failed ZPL preview is reported in the page (`previewError`) and must never block printing.
 - The printer can report `media-empty` while printing fine, so state reasons are shown as warnings and never block a
   print.
+- Cancel-Job is in `operations-supported` and takes `printer-uri` + `job-id`. PAPPL refuses a completed, canceled or
+  aborted job with `client-error-not-possible`, and an unknown id with `client-error-not-found`; those messages are
+  shown as LPrint sent them. A processing job only stops at its next page, so it can read "processing" for a moment
+  after a successful cancel. Without an LPrint `auth-service`, PAPPL doesn't check that the canceller owns the job.
 
 Never send to port 9100 directly. Every job must go through LPrint so it appears in LPrint's job list.
 

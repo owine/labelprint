@@ -43,7 +43,9 @@ Some details that aren't obvious:
   Sans/Serif/Mono.
 - **"Sent" isn't "printed."** LPrint accepts a job even when the printer is offline or out of media and holds it.
   After printing, the page polls Get-Jobs. A job that ends up aborted or canceled turns the result red and shows
-  LPrint's `job-state-message`, and the header shows the printer's state reasons.
+  LPrint's `job-state-message`, and the header shows the printer's state reasons. A job that's still pending, held,
+  processing or stopped can be canceled from the recent-jobs table (click "cancel", then "confirm?"), so a wrong
+  label doesn't print when the printer comes back. LPrint's answer shows in the row.
 
 The preview is drawn in the container too, for up to 12 pages or labels:
 

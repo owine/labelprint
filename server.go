@@ -40,6 +40,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok\n") })
 	mux.HandleFunc("GET /api/printer", s.handlePrinter)
 	mux.HandleFunc("GET /api/jobs", s.handleJobs)
+	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.handleCancel)
 	mux.HandleFunc("POST /api/preview", s.handlePreview)
 	mux.HandleFunc("POST /api/print", s.handlePrint)
 
@@ -136,6 +137,39 @@ func (s *server) handleJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": nonNil(jobs)})
+}
+
+// handleCancel sends Cancel-Job for a job in LPrint's list, so a held label
+// doesn't print when the printer comes back. LPrint decides what can be
+// canceled; its refusal (already completed, not found) is passed on as is.
+func (s *server) handleCancel(w http.ResponseWriter, r *http.Request) {
+	id, ok := parseJobID(r.PathValue("id"))
+	if !ok {
+		s.fail(w, badRequest("a job id is a whole number from 1 up"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	err := s.ipp.cancelJob(ctx, id, s.requestUser(r))
+	s.log.Info("cancel", "job", id, "error", errString(err))
+	if err != nil {
+		s.fail(w, gateway(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"id": id})
+}
+
+// parseJobID accepts only a plain positive integer that fits IPP's job-id
+// (1 to 2³¹−1): no sign, no leading zeros, no spaces.
+func parseJobID(v string) (int, bool) {
+	if v == "" || v[0] < '1' || v[0] > '9' {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(v, 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return int(n), true
 }
 
 // ---------------------------------------------------------------- uploads

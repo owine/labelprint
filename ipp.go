@@ -1,7 +1,7 @@
 package main
 
 // A minimal IPP/2.0 client (RFC 8010 encoding, RFC 8011 semantics): just enough
-// to send Print-Job, Get-Printer-Attributes and Get-Jobs to LPrint.
+// to send Print-Job, Cancel-Job, Get-Printer-Attributes and Get-Jobs to LPrint.
 //
 // The wire format is a fixed 8-byte header followed by attribute groups. Each
 // group opens with a one-byte delimiter tag, and each attribute is a TLV:
@@ -31,6 +31,7 @@ import (
 // Operation ids.
 const (
 	opPrintJob             uint16 = 0x0002
+	opCancelJob            uint16 = 0x0008
 	opGetJobs              uint16 = 0x000A
 	opGetPrinterAttributes uint16 = 0x000B
 )
@@ -563,6 +564,21 @@ func (c *ippClient) printJob(ctx context.Context, p printRequest) (job jobInfo, 
 		}
 	}
 	return job, warning, nil
+}
+
+// cancelJob sends Cancel-Job for one of LPrint's jobs. PAPPL cancels a pending
+// or held job at once; a processing one stops at the next page boundary, so it
+// can still read "processing" for a moment. A job that's already completed,
+// canceled or aborted comes back as client-error-not-possible, and an id LPrint
+// doesn't know as client-error-not-found, each with LPrint's status-message.
+func (c *ippClient) cancelJob(ctx context.Context, id int, user string) error {
+	// The target (printer-uri + job-id) follows charset and language,
+	// then requesting-user-name (RFC 8011 §4.1.5, §4.3.3).
+	req := newIPPRequest(opCancelJob, c.id(), c.printerURI, "")
+	req.integer(tagInteger, "job-id", int32(id))
+	req.str(tagName, "requesting-user-name", truncateUTF8(user, 255))
+	_, err := c.do(ctx, req, nil)
+	return err
 }
 
 func (c *ippClient) jobs(ctx context.Context, limit int) ([]jobInfo, error) {

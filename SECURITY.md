@@ -3,7 +3,7 @@
 ## What labelprint is, security-wise
 
 labelprint turns an HTTP upload into a print job. It has **no login of its own**: anyone who can reach it can print,
-see LPrint's recent job names, and read the printer's status. Run it behind something that authenticates, such as
+cancel jobs still in LPrint's queue, see LPrint's recent job names, and read the printer's status. Run it behind something that authenticates, such as
 an auth proxy (Authelia, oauth2-proxy, …) in front of a reverse proxy, or a network only you can reach. Never expose
 it to the internet directly.
 
