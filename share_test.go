@@ -305,6 +305,7 @@ func TestShareRejects(t *testing.T) {
 		{"plain text", "notes.txt", []byte("hello"), 0, 415, "unsupported"},
 		{"too big", "big.zpl", bytes.Repeat([]byte("^XA^XZ"), 400), 1024, 413, "too-big"},
 		{"empty", "a.zpl", nil, 0, 400, "unreadable"},
+		{"epl2", "a.zpl", []byte(epl2Sample), 0, 415, "epl2"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

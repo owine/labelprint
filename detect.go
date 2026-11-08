@@ -66,14 +66,72 @@ func detectKind(filename string, data []byte) (docKind, error) {
 	case bytes.HasPrefix(data, []byte{0xFF, 0xD8, 0xFF}):
 		return kindJPEG, nil
 	}
+	// A ^XA … ^XZ label wins; EPL2 is checked before the .zpl extension so an
+	// EPL2 body saved as .zpl is still refused (LPrint would print it as text).
 	ext := strings.ToLower(filepath.Ext(filename))
-	if ext == ".zpl" || containsZPLLabel(data) {
+	if containsZPLLabel(data) {
+		return kindZPL, nil
+	}
+	if looksLikeEPL2(data) {
+		return "", errEPL2
+	}
+	if ext == ".zpl" {
 		return kindZPL, nil
 	}
 	if ext == ".txt" {
 		return "", &userError{Status: 415, Msg: "that .txt file has no ZPL label in it (no ^XA … ^XZ)"}
 	}
 	return "", &userError{Status: 415, Msg: "unsupported file — send ZPL (.zpl/.txt), PDF, PNG or JPEG"}
+}
+
+// errEPL2 is what an EPL2 upload gets. UPS and FedEx offer EPL2 next to ZPL,
+// and LPrint doesn't take it, so it's refused rather than passed on as ZPL.
+var errEPL2 = &userError{Status: 415, Msg: "EPL2 isn't supported — choose ZPL or PDF in your shipping tool"}
+
+// looksLikeEPL2 reports whether data starts like an EPL2 label: the first
+// non-empty line is exactly "N" (clear buffer), and one of the next few
+// non-empty lines is a typical EPL2 command with arguments (q812, Q1218,24,
+// A50,50,0,3,1,1,N,"x", B…, P1 and so on) or ZT/ZB. Requiring both keeps plain
+// text and CSV that merely start with "N" out.
+func looksLikeEPL2(data []byte) bool {
+	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+	data = data[:min(len(data), 2048)]
+	seen := 0
+	for line := range bytes.Lines(data) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		seen++
+		if seen == 1 {
+			if string(line) != "N" {
+				return false
+			}
+			continue
+		}
+		if epl2Command(line) {
+			return true
+		}
+		if seen > 6 {
+			return false
+		}
+	}
+	return false
+}
+
+// epl2Command matches a command letter (or two) followed by a digit, or the
+// argument-less ZT/ZB.
+func epl2Command(line []byte) bool {
+	if string(line) == "ZT" || string(line) == "ZB" {
+		return true
+	}
+	n := 1
+	if bytes.HasPrefix(line, []byte("LO")) || bytes.HasPrefix(line, []byte("GW")) {
+		n = 2
+	} else if !strings.ContainsRune("qQSDABbPRO", rune(line[0])) {
+		return false
+	}
+	return len(line) > n && line[n] >= '0' && line[n] <= '9'
 }
 
 // containsZPLLabel reports whether data has a ^XA that is later closed by ^XZ.
