@@ -23,14 +23,21 @@ import (
 // at the printer's dots (see labels.go); anti-aliasing is off for them, since
 // smoothed edges would be dithered into fuzzy barcode bars.
 type pdfRenderer struct {
-	dpi     int
-	timeout time.Duration // per poppler invocation
-	slots   chan struct{} // caps concurrent pipelines on a small Pi
-	log     *slog.Logger
+	dpi      int
+	timeout  time.Duration // per poppler invocation
+	deadline time.Duration // per request, for everything it does with a PDF (pdfRequestTimeout)
+	slots    chan struct{} // caps concurrent pipelines on a small Pi
+	log      *slog.Logger
 }
 
+// pdfRequestTimeout bounds one preview or print's work on a PDF, waiting for
+// a slot included. It's under the server's WriteTimeout (main.go, 5 min) so
+// the reply saying it ran out still gets written.
+const pdfRequestTimeout = 4 * time.Minute
+
 func newPDFRenderer(dpi int, log *slog.Logger) *pdfRenderer {
-	return &pdfRenderer{dpi: dpi, timeout: 60 * time.Second, slots: make(chan struct{}, 2), log: log}
+	return &pdfRenderer{dpi: dpi, timeout: 60 * time.Second, deadline: pdfRequestTimeout,
+		slots: make(chan struct{}, 2), log: log}
 }
 
 // acquire takes one of the two pipeline slots: everything one request does

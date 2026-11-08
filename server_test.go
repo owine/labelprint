@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // fakeLPrint answers the operations the app uses and records every request it
@@ -906,4 +907,43 @@ func TestPrintRefusesWhenDetectionFails(t *testing.T) {
 	if n := len(fake.printJobs()); n != 4 {
 		t.Errorf("%d jobs, want 2 + 2", n)
 	}
+}
+
+// A PDF request has one overall deadline. Running out of it is a clear 504,
+// never a 500 with poppler's wording, and print doesn't mistake it for a
+// detection failure.
+func TestPDFRequestDeadline(t *testing.T) {
+	requirePoppler(t)
+	want := "that pdf took too long to prepare — try fewer pages"
+	check := func(t *testing.T, h http.Handler, fields map[string]string) {
+		t.Helper()
+		for _, path := range []string{"/api/preview", "/api/print"} {
+			rec, out := post(t, h, path, "x.pdf", fixLabelThenText(), fields)
+			if rec.Code != 504 || out["error"] != want {
+				t.Errorf("%s %v: %d %s, want 504 %q", path, fields, rec.Code, rec.Body, want)
+			}
+		}
+	}
+	t.Run("before anything runs", func(t *testing.T) {
+		fake, s := newTestServerS(t)
+		s.pdf.deadline = time.Nanosecond
+		check(t, s.routes(), nil)
+		if n := len(fake.printJobs()); n != 0 {
+			t.Errorf("%d jobs sent", n)
+		}
+	})
+	t.Run("while rendering", func(t *testing.T) {
+		fake, s := newTestServerS(t)
+		s.pdf.deadline = 500 * time.Millisecond
+		shimTool(t, "pdftoppm", `exec sleep 5`) // pdfinfo answers; every render hangs
+		start := time.Now()
+		check(t, s.routes(), nil)
+		check(t, s.routes(), map[string]string{"layout": "page"})
+		if d := time.Since(start); d > 15*time.Second {
+			t.Errorf("took %s: the deadline didn't stop poppler", d)
+		}
+		if n := len(fake.printJobs()); n != 0 {
+			t.Errorf("%d jobs sent", n)
+		}
+	})
 }

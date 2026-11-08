@@ -414,7 +414,11 @@ func (s *server) openPDF(ctx context.Context, up *upload) (*pdfDoc, []int, error
 // maxPreviewLabels boxes, the label images exactly as they'd be sent.
 // Detection runs on every selected page so labels is the full count; pages
 // and label images are capped.
-func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewResponse) error {
+func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewResponse) (err error) {
+	ctx, cancel := context.WithTimeout(ctx, s.pdf.deadline)
+	defer cancel()
+	defer func() { err = tookTooLong(ctx, err) }() // deferred after cancel, so it runs first
+
 	release, err := s.pdf.acquire(ctx) // held for every poppler call, pdfinfo included
 	if err != nil {
 		return err
@@ -605,58 +609,76 @@ func (s *server) buildJobs(ctx context.Context, up *upload, copies int, media, u
 		return []printRequest{base}, nil
 
 	case kindPDF:
-		release, err := s.pdf.acquire(ctx) // held for every poppler call, pdfinfo included
-		if err != nil {
-			return nil, err
-		}
-		defer release()
-		doc, pages, err := s.openPDF(ctx, up)
-		if err != nil {
-			return nil, err
-		}
-		defer doc.Close()
-		o, err := s.labelOpts(up.Fields, doc, pages, media)
-		if err != nil {
-			return nil, err
-		}
-		// One job per label: LPrint takes a single document per job
-		// (multiple-document-jobs-supported = false). Skipped pages (no
-		// label, beside pages with one) send nothing.
-		plans, err := doc.plan(ctx, pages, o)
-		if err != nil {
-			return nil, err
-		}
-		// The preview falls back to the whole page when detection fails; print
-		// refuses instead, since what it would send (and skip) isn't what the
-		// preview showed.
-		for _, pl := range plans {
-			if pl.Failed {
-				if err := ctx.Err(); err != nil {
-					return nil, err
-				}
-				return nil, &userError{Status: http.StatusUnprocessableEntity,
-					Msg: fmt.Sprintf("couldn't find the labels on page %d this time — try again, or choose whole page", pl.Page)}
-			}
-		}
-		var out []printRequest
-		for _, pl := range plans {
-			if pl.Skip {
-				continue
-			}
-			for i, b := range pl.Boxes {
-				l, err := doc.label(ctx, pl.Page, b, o)
-				if err != nil {
-					return nil, &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
-				}
-				pr := base
-				pr.Format, pr.Scaling, pr.Data, pr.Note = kindPNG.mimeType(), "fit", l.PNG, l.Method
-				pr.JobName = pdfJobName(up.Filename, pl.Page, doc.Pages, i, len(pl.Boxes))
-				out = append(out, pr)
-			}
-		}
-		return out, nil
+		return s.pdfJobs(ctx, up, base, media)
 	}
 	return nil, badRequest("unsupported file")
+}
+
+// tookTooLong turns any failure after a PDF request's deadline passed into
+// one clear reply, whatever poppler or the code under it made of it.
+func tookTooLong(ctx context.Context, err error) error {
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return &userError{Status: http.StatusGatewayTimeout, Msg: "that pdf took too long to prepare — try fewer pages"}
+	}
+	return err
+}
+
+// pdfJobs is buildJobs for a PDF: one job per label, within the PDF
+// request deadline.
+func (s *server) pdfJobs(ctx context.Context, up *upload, base printRequest, media string) (out []printRequest, err error) {
+	ctx, cancel := context.WithTimeout(ctx, s.pdf.deadline)
+	defer cancel()
+	defer func() { err = tookTooLong(ctx, err) }() // deferred after cancel, so it runs first
+
+	release, err := s.pdf.acquire(ctx) // held for every poppler call, pdfinfo included
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	doc, pages, err := s.openPDF(ctx, up)
+	if err != nil {
+		return nil, err
+	}
+	defer doc.Close()
+	o, err := s.labelOpts(up.Fields, doc, pages, media)
+	if err != nil {
+		return nil, err
+	}
+	// One job per label: LPrint takes a single document per job
+	// (multiple-document-jobs-supported = false). Skipped pages (no
+	// label, beside pages with one) send nothing.
+	plans, err := doc.plan(ctx, pages, o)
+	if err != nil {
+		return nil, err
+	}
+	// The preview falls back to the whole page when detection fails; print
+	// refuses instead, since what it would send (and skip) isn't what the
+	// preview showed.
+	for _, pl := range plans {
+		if pl.Failed {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return nil, &userError{Status: http.StatusUnprocessableEntity,
+				Msg: fmt.Sprintf("couldn't find the labels on page %d this time — try again, or choose whole page", pl.Page)}
+		}
+	}
+	for _, pl := range plans {
+		if pl.Skip {
+			continue
+		}
+		for i, b := range pl.Boxes {
+			l, err := doc.label(ctx, pl.Page, b, o)
+			if err != nil {
+				return nil, &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
+			}
+			pr := base
+			pr.Format, pr.Scaling, pr.Data, pr.Note = kindPNG.mimeType(), "fit", l.PNG, l.Method
+			pr.JobName = pdfJobName(up.Filename, pl.Page, doc.Pages, i, len(pl.Boxes))
+			out = append(out, pr)
+		}
+	}
+	return out, nil
 }
 
 func repeatZPL(data []byte, n int) []byte {
