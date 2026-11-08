@@ -1186,6 +1186,7 @@ $('theme').addEventListener('click', () => {
 const shareErrors = {
   'too-big': () => `that file is over the ${state.maxMB} MB limit`,
   unsupported: () => "labelprint can't print that file — share a zpl, pdf, png or jpeg",
+  epl2: () => "EPL2 isn't supported — choose zpl or pdf in your shipping tool",
   unreadable: () => "couldn't read the shared file — try sharing it again",
 };
 

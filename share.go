@@ -213,6 +213,9 @@ func (s *server) handleShare(w http.ResponseWriter, r *http.Request) {
 func shareErrorCode(err error) string {
 	var ue *userError
 	if errors.As(err, &ue) {
+		if ue == errEPL2 {
+			return "epl2"
+		}
 		switch ue.Status {
 		case http.StatusRequestEntityTooLarge:
 			return "too-big"

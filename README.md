@@ -26,7 +26,9 @@ drives should work; set `RENDER_DPI` to match.
 | PDF | `%PDF-` header | one job per label: the label boxes found on each page (or chosen in the preview), each a pure black/white PNG exactly the label's size, `print-scaling=fit` and the chosen `media` |
 | PNG / JPEG | magic bytes | the file unchanged, `print-scaling=fit` and the chosen `media` |
 
-Anything else is rejected, and so are uploads over 20 MB.
+Anything else is rejected, and so are uploads over 20 MB. EPL2 (the other format UPS and FedEx offer, recognised by an
+`N` line followed by commands such as `q`, `Q`, `A`, `B` or `P`) is refused with a message to choose ZPL or PDF in your
+shipping tool, even if the file is named `.zpl`: LPrint doesn't accept EPL2.
 
 Some details that aren't obvious:
 

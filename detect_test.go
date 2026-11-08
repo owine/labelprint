@@ -3,8 +3,23 @@ package main
 import (
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 )
+
+// A short UPS-style EPL2 label with made-up content.
+const epl2Sample = `
+N
+q812
+Q1218,24
+S4
+D8
+ZT
+A50,50,0,3,1,1,N,"SAMPLE SENDER"
+A50,100,0,3,1,1,N,"1 EXAMPLE ST"
+B50,400,0,1,2,6,100,B,"1Z000000000000000"
+P1
+`
 
 func TestDetectKind(t *testing.T) {
 	cases := []struct {
@@ -24,6 +39,30 @@ func TestDetectKind(t *testing.T) {
 		{"x.jpg", "\xff\xd8\xff\xe0rest", kindJPEG, 0},
 		{"x.gif", "GIF89a....", "", 415},
 		{"empty.zpl", "", "", 400},
+		// EPL2 is refused, whatever it is called; ZPL and plain text are not caught by it.
+		{"label.epl", epl2Sample, "", 415},
+		{"label.txt", epl2Sample, "", 415},
+		{"label.zpl", epl2Sample, "", 415},
+		{"label.txt", "\r\n\r\n" + strings.ReplaceAll(epl2Sample, "\n", "\r\n"), "", 415},
+		{"label.txt", "N\nq812\nP1\n", "", 415},
+		{"label.txt", "N  \nZT\n", "", 415},
+		{"label.zpl", "N\n^XA^FDhi^FS^XZ", kindZPL, 0}, // ZPL label wins
+		{"label.zpl", "N\n~JC", kindZPL, 0},
+		{"notes.txt", "N", "", 415},
+		{"notes.txt", "N\nPlease call me\nAbout the parcel", "", 415},
+		{"data.csv", "N,name,city\nA1,bob,x\n", "", 415},
+		{"notes.txt", "Name\nq812\n", "", 415},
+		{"label.zpl", "Name\nq812\n", kindZPL, 0},
+		// setup lines before N
+		{"a.zpl", "I8,A,001\nOD\nJF\nZB\nq812\nQ1218,24\nN\nA50,50,0,3,1,1,N,\"x\"\nP1\n", "", 415},
+		{"a.zpl", "\r\nOD\r\nN\r\nP1\r\n", "", 415},
+		{"a.zpl", "OD\nN\nP1", "", 415},
+		{"a.zpl", "line one\nline two\nN\nA1,2\n", kindZPL, 0},
+		{"a.zpl", "O\nN\nrow,1\n", kindZPL, 0},
+		{"a.zpl", "O\nN\n", kindZPL, 0},
+		{"a.zpl", "OD\nN\n", kindZPL, 0},
+		{"a.zpl", "Hello\nOD\nN\nP1\n", kindZPL, 0},
+		{"x.pdf", "N\nq812\n%PDF-1.4", kindPDF, 0},
 	}
 	for _, c := range cases {
 		got, err := detectKind(c.name, []byte(c.data))
@@ -83,6 +122,30 @@ func TestParsePageRange(t *testing.T) {
 		var ue *userError
 		if _, err := parsePageRange(spec, 5); !errors.As(err, &ue) || ue.Status != 400 {
 			t.Errorf("%q: want a 400 userError, got %v", spec, err)
+		}
+	}
+}
+
+func TestDetectEPL2Message(t *testing.T) {
+	for _, name := range []string{"a.epl", "a.txt", "a.zpl", "a"} {
+		_, err := detectKind(name, []byte(epl2Sample))
+		if !errors.Is(err, errEPL2) || !strings.Contains(err.Error(), "choose ZPL or PDF") {
+			t.Errorf("%s: got %v, want the EPL2 error", name, err)
+		}
+	}
+	if _, err := detectKind("a.txt", []byte("N\nhello")); errors.Is(err, errEPL2) {
+		t.Error("plain text starting with N is not EPL2")
+	}
+}
+
+func TestDetectEPL2SetupFirst(t *testing.T) {
+	for _, d := range []string{
+		"I8,A,001\nOD\nJF\nZB\nq812\nQ1218,24\nN\nA50,50,0,3,1,1,N,\"x\"\nP1\n",
+		"\r\nOD\r\nN\r\nP1\r\n",
+		"OD\nN\nP1",
+	} {
+		if _, err := detectKind("a.zpl", []byte(d)); !errors.Is(err, errEPL2) {
+			t.Errorf("%q: got %v, want the EPL2 error", d, err)
 		}
 	}
 }
