@@ -58,6 +58,16 @@ The preview is drawn in the container too, for up to 12 pages or labels:
 - **PDFs** show the pages exactly as they'll be sent: 203 dpi grayscale.
 - **PNG and JPEG** previews are drawn by your browser.
 
+## Feeding and calibrating
+
+**Feed a label** in the header feeds one blank label. It's sent as an ordinary ZPL job through LPrint, so it shows up
+in LPrint's job list. The ZPL is fixed on the server (a one-dot box, `^XA^FO0,0^GB1,1,1^FS^XZ`), so the endpoint
+can't be used to send arbitrary ZPL.
+
+**Calibration happens at the printer.** If it reports `media-empty` with labels loaded, use SmartCal: hold FEED until
+the light flashes twice, then let go. There's no remote calibrate on purpose. Sending `~JC` through LPrint left the
+printer jammed, and nobody was there to clear it.
+
 ## Configuration
 
 All settings are environment variables. Only `LPRINT_URI` is required.

@@ -21,6 +21,7 @@ example stack. The repo is public: keep real hostnames, addresses and deployment
 | `zpl.go` | ZPL preview via zebrash (the only module dependency): panic recovery, timeout, canvas from `^PW`/`^LL` or the media |
 | `media.go` | turns LPrint's `media-supported` PWG names into dropdown labels and sizes |
 | `server.go` | HTTP handlers, upload limits, the print flow, cross-origin protection, security headers |
+| `maintenance.go` | `POST /api/printer/maintenance`: "feed a label" as a ZPL job (a one-dot box). No remote calibrate: that's SmartCal at the printer |
 | `web/` | the page: vanilla JS, owine design tokens (`tokens.css`), vendored fonts. No build step |
 
 ## Constraints that shaped the code
