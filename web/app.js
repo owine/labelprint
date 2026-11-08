@@ -87,7 +87,7 @@ function renderPrinter(p) {
 
 function fillMedia(p) {
   const sel = $('media');
-  const keep = sel.value;
+  const keep = mediaPicked ? sel.value : pref.get(PREF_MEDIA) || sel.value;
   sel.replaceChildren();
   for (const m of p.media) {
     sel.append(el('option', { value: m.name, textContent: m.label + (m.ready ? ' · loaded' : '') }));
@@ -288,6 +288,7 @@ $('form').addEventListener('submit', async (e) => {
     r.jobs.forEach((j) => state.mine.add(j.id));
     state.lastResult = r;
     renderPrintResult();
+    resetCopies();
   } catch (err) {
     const sent = err.body?.jobs || [];
     sent.forEach((j) => state.mine.add(j.id));
@@ -395,6 +396,59 @@ function renderJobs(jobs) {
       el('td', {}, el('span', { className: 'badge ' + (stateBadge[j.state] || 'badge-neutral'), textContent: j.state })),
       when);
   }));
+}
+
+// ---------------------------------------------------------------- paste
+
+// A file on the clipboard (a copied pdf, a screenshot) loads like a drop. In a
+// text field the field gets the paste if there's text for it, so pasting into
+// pages or copies works as usual; a file with no text (a screenshot) still
+// loads, since the field couldn't take it anyway.
+document.addEventListener('paste', (e) => {
+  const f = e.clipboardData?.files?.[0];
+  if (!f) return;
+  const field = e.target.closest?.('input:not([type=file]), textarea, [contenteditable]');
+  if (field && e.clipboardData.types.includes('text/plain')) return;
+  e.preventDefault();
+  chooseFile(f);
+});
+
+// ---------------------------------------------------------------- remembered settings
+
+// Per browser, like the theme. Only the size and the copies count are kept,
+// nothing about the file. The size applies only while lprint still lists it
+// (fillMedia checks); copies go back to 1 once a print succeeds, so a ×3
+// can't carry over to the next label by accident.
+const PREF_MEDIA = 'labelprint-media';
+const PREF_COPIES = 'labelprint-copies';
+const pref = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* storage blocked */ } },
+  del(k) { try { localStorage.removeItem(k); } catch { /* storage blocked */ } },
+};
+
+// Until a size is picked here, refreshes keep trying the saved one, so it
+// still lands if lprint was unreachable when the page loaded.
+let mediaPicked = false;
+$('media').addEventListener('change', () => {
+  mediaPicked = true;
+  pref.set(PREF_MEDIA, $('media').value);
+});
+
+$('copies').addEventListener('input', () => {
+  const n = parseInt($('copies').value, 10);
+  if (n === 1) pref.del(PREF_COPIES);
+  else if (n > 1 && n <= state.maxCopies) pref.set(PREF_COPIES, String(n));
+});
+
+function resetCopies() {
+  $('copies').value = '1';
+  pref.del(PREF_COPIES);
+}
+
+{
+  const n = parseInt(pref.get(PREF_COPIES), 10);
+  if (n > 1 && n <= state.maxCopies) $('copies').value = String(n);
 }
 
 // ---------------------------------------------------------------- theme
