@@ -73,6 +73,8 @@ func TestMaintenanceRejectsAnythingElse(t *testing.T) {
 		`{"action":"feed","zpl":"^XA^FDsneaky^FS^XZ"}`, // no client-supplied zpl, not even alongside a valid action
 		`not json`,
 		`{"action":"` + strings.Repeat("x", 4096) + `"}`,
+		`{"action":"feed"}{"action":"feed"}`, // one request, one value: no trailing JSON
+		`{"action":"feed"} garbage`,
 	} {
 		t.Run(body[:min(len(body), 24)], func(t *testing.T) {
 			fake, h := newTestServer(t)

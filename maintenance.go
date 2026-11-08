@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 )
 
@@ -33,7 +34,9 @@ func (s *server) handleMaintenance(w http.ResponseWriter, r *http.Request) {
 	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<10))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
+	// Exactly one JSON value: anything after it (a second object, garbage)
+	// makes the request malformed, and a malformed request mustn't feed.
+	if err := dec.Decode(&req); err != nil || dec.Decode(&struct{}{}) != io.EOF {
 		s.fail(w, badRequest(`expected {"action": "feed"}`))
 		return
 	}
