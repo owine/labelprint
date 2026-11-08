@@ -18,6 +18,8 @@ const state = {
   lastResult: null,    // { jobs, warnings } of the last print, for live updates
   maxMB: 20,
   maxCopies: 100,
+  layout: 'auto',      // label area for pdfs: auto | page
+  pdf: { pages: new Map(), media: null, labelsElsewhere: 0, meta: null },
 };
 
 // ---------------------------------------------------------------- api
@@ -44,6 +46,114 @@ function formData(extra = {}) {
   for (const [k, v] of Object.entries(extra)) fd.append(k, v);
   fd.append('file', state.file, state.file.name); // file last: fields first keeps the server's reads small
   return fd;
+}
+
+// ---------------------------------------------------------------- pdf label areas
+//
+// For PDFs the server finds label boxes on each page. The page shows them over
+// the page image; edits go back as `crops` for that page. Boxes are fractions
+// of the page as displayed: x, y, w, h from the top-left.
+
+const MIN_IN = 0.5;   // the server refuses smaller boxes
+const MAX_BOXES = 8;  // per page, as the server allows
+const round4 = (v) => Math.round(v * 1e4) / 1e4;
+const fmtIn = (v) => String(Math.round(v * 100) / 100);
+const arrBox = (a) => ({ x: a[0], y: a[1], w: a[2], h: a[3] });
+const cloneBoxes = (bs) => bs.map((b) => ({ ...b, tab: b.tab ? { ...b.tab } : null }));
+
+function clearEdits() {
+  state.pdf.pages = new Map();
+}
+
+function resetPdf() {
+  state.pdf = { pages: new Map(), media: null, labelsElsewhere: 0, meta: null };
+}
+
+// flatBoxes is what a page prints, in order. Task 14 adds doc tab choices here.
+// A skipped page (no label found while other pages have one) prints nothing
+// until it's included.
+function flatBoxes(pg) {
+  if (pg.skipped && !pg.edited) return [];
+  return pg.boxes;
+}
+
+function cropsField() {
+  const out = {};
+  for (const pg of state.pdf.pages.values()) {
+    if (!pg.edited || !pg.boxes.length) continue;
+    out[pg.page] = flatBoxes(pg).map((b) => [b.x, b.y, b.w, b.h].map(round4));
+  }
+  return Object.keys(out).length ? JSON.stringify(out) : '';
+}
+
+// requestFields are the form fields both preview and print send.
+function requestFields() {
+  const f = { pages: $('pages').value, media: $('media').value, layout: state.layout };
+  const crops = cropsField();
+  if (crops) f.crops = crops;
+  return f;
+}
+
+// absorbPdf takes a preview reply, keeping the boxes of pages the user edited.
+// An edited page also keeps what detection said about it (auto, fallback,
+// skipped), since the reply describes the crops sent; reset goes back to that.
+function absorbPdf(r) {
+  state.pdf.media = r.widthIn ? { w: r.widthIn, h: r.heightIn } : null;
+  state.pdf.meta = { selected: r.selected, pageCount: r.pageCount };
+  const old = state.pdf.pages;
+  const next = new Map();
+  let shownLabels = 0;
+  for (const p of r.pages || []) {
+    const fresh = (p.boxes || []).map((a, i) => ({
+      ...arrBox(a), autoIndex: i, tab: p.tabs?.[i] ? arrBox(p.tabs[i]) : null, choice: 'off',
+    }));
+    const prev = old.get(p.page);
+    const edited = !!prev?.edited;
+    const pg = {
+      page: p.page, image: p.image, widthIn: p.widthIn, heightIn: p.heightIn,
+      auto: edited ? prev.auto : !!p.auto,
+      fallback: edited ? prev.fallback : !!p.fallback,
+      skipped: edited ? prev.skipped : !!p.skipped,
+      labelImages: p.labelImages || [],
+      edited,
+      boxes: edited ? prev.boxes : fresh,
+      autoBoxes: edited ? prev.autoBoxes : cloneBoxes(fresh),
+    };
+    if (!p.skipped) shownLabels += fresh.length;
+    next.set(p.page, pg);
+  }
+  // labels on pages past the preview cap, which the page doesn't hold
+  state.pdf.labelsElsewhere = (r.labels || 0) - shownLabels;
+  state.pdf.pages = next;
+}
+
+function pdfLabelCount() {
+  let n = state.pdf.labelsElsewhere;
+  for (const pg of state.pdf.pages.values()) n += flatBoxes(pg).length;
+  return n;
+}
+
+// Pages the user left with no boxes. A skipped page isn't one: it prints
+// nothing on purpose.
+function emptyPages() {
+  return [...state.pdf.pages.values()].filter((pg) => pg.edited && !pg.boxes.length);
+}
+
+// An edit to a page: draw it, recount, and re-preview with its crops.
+function markEdited(pg) {
+  pg.edited = true;
+  renderPdf();
+  updateSummary();
+  schedulePreview();
+}
+
+// Drop a page's edits and go back to what detection found.
+function resetPage(pg) {
+  pg.edited = false;
+  pg.boxes = cloneBoxes(pg.autoBoxes);
+  renderPdf();
+  updateSummary();
+  schedulePreview();
 }
 
 // ---------------------------------------------------------------- printer
@@ -106,6 +216,9 @@ function chooseFile(file) {
   state.objectURL = null;
   state.file = file;
   state.kind = null;
+  resetPdf();
+  state.layout = 'auto';
+  document.querySelector('input[name="layout"][value="auto"]').checked = true;
   $('drop').classList.toggle('has-file', !!file);
   $('file-row').hidden = !file;
   $('pages').value = '';
@@ -113,6 +226,7 @@ function chooseFile(file) {
     $('file').value = '';
     $('preview').hidden = true;
     $('pages-field').hidden = true;
+    $('layout-field').hidden = true;
     setMediaHint(null);
     updateSummary();
     return;
@@ -135,12 +249,6 @@ function setMediaHint(kind) {
   $('media-hint').textContent = kind === 'zpl' ? 'for the preview — the zpl sets the printed size' : '';
 }
 
-let pagesTimer;
-$('pages').addEventListener('input', () => {
-  clearTimeout(pagesTimer);
-  pagesTimer = setTimeout(preview, 450);
-});
-
 async function preview() {
   if (!state.file) return;
   const seq = ++state.previewSeq;
@@ -149,14 +257,19 @@ async function preview() {
   $('pages').removeAttribute('aria-invalid');
   let r;
   try {
-    r = await api('/api/preview', { method: 'POST', body: formData({ pages: $('pages').value, media: $('media').value }) });
+    r = await api('/api/preview', { method: 'POST', body: formData(requestFields()) });
   } catch (e) {
     if (seq !== state.previewSeq) return;
     box.classList.remove('loading');
-    if (state.kind === 'pdf' && /page/i.test(e.message)) {
+    const field = e.body?.field;
+    if (field === 'pages') {
       // a bad page range: keep the file, flag the field
       $('pages').setAttribute('aria-invalid', 'true');
       $('pages-hint').textContent = e.message;
+    } else if (field === 'crops' || field === 'layout') {
+      const note = $('preview-note');
+      note.textContent = e.message;
+      note.classList.add('err');
     } else {
       state.kind = null;
       $('file-kind').textContent = 'rejected';
@@ -174,26 +287,23 @@ async function preview() {
   $('file-kind').textContent = r.kind;
   $('file-kind').className = 'badge badge-accent';
   $('pages-field').hidden = r.kind !== 'pdf';
+  $('layout-field').hidden = r.kind !== 'pdf';
   setMediaHint(r.kind);
   renderPreview(r);
-  updateSummary(r);
+  updateSummary();
 }
 
 function renderPreview(r) {
   const grid = $('preview-grid');
   const note = $('preview-note');
-  grid.replaceChildren();
+  if (r.kind !== 'pdf') grid.replaceChildren(); // renderPdf swaps the pages itself, keeping focus
+  grid.classList.toggle('pdf-mode', r.kind === 'pdf');
+  note.classList.remove('err');
   document.querySelector('.zpl-source')?.remove();
   $('preview').hidden = false;
   if (r.kind === 'pdf') {
-    const shown = r.pages.length;
-    note.textContent = `${r.selected} of ${r.pageCount} page${r.pageCount === 1 ? '' : 's'} selected · ` +
-      `rendered at 203 dpi, grayscale` + (r.selected > shown ? ` · showing the first ${shown}` : '');
-    for (const p of r.pages) {
-      grid.append(el('figure', { className: 'preview-item' },
-        el('img', { src: p.image, alt: `page ${p.page}`, loading: 'lazy' }),
-        el('figcaption', { textContent: `p${p.page}` })));
-    }
+    absorbPdf(r);
+    renderPdf();
   } else if (r.kind === 'png' || r.kind === 'jpeg') {
     state.objectURL = URL.createObjectURL(state.file);
     note.textContent = 'scaled to fit the label';
@@ -218,6 +328,124 @@ function renderPreview(r) {
   }
 }
 
+function renderPdf() {
+  const grid = $('preview-grid');
+  const note = $('preview-note');
+  const a = document.activeElement;
+  const fig = a?.dataset?.tool ? a.closest('.pdf-page') : null;
+  const focus = fig ? { page: fig.dataset.page, tool: a.dataset.tool } : null;
+  const { selected, pageCount } = state.pdf.meta;
+  const shown = state.pdf.pages.size;
+  const n = pdfLabelCount();
+  const m = state.pdf.media;
+  note.textContent = `${selected} of ${pageCount} page${pageCount === 1 ? '' : 's'} · ${n} label${n === 1 ? '' : 's'}` +
+    (m ? ` · black and white, sized for ${fmtIn(m.w)} × ${fmtIn(m.h)} in` : '') +
+    (selected > shown ? ` · showing the first ${shown} pages` : '');
+  grid.replaceChildren(...[...state.pdf.pages.values()].map(pageFigure));
+  if (focus) focusTool({ page: focus.page }, focus.tool);
+}
+
+function pageCaption(pg) {
+  const n = pg.boxes.length;
+  if (pg.edited) return `p${pg.page} · ${n} label area${n === 1 ? '' : 's'}, edited`;
+  if (pg.skipped) return `p${pg.page} · no label found, not printing`;
+  if (pg.fallback) return `p${pg.page} · no label found, using the whole page`;
+  if (pg.auto) return `p${pg.page} · ${n} label${n === 1 ? '' : 's'} found`;
+  return `p${pg.page} · whole page`;
+}
+
+function pageFigure(pg) {
+  const skipped = pg.skipped && !pg.edited;
+  const stage = el('div', { className: 'page-stage' },
+    el('img', { src: pg.image, alt: `page ${pg.page}`, draggable: false }));
+  stage.style.aspectRatio = `${pg.widthIn} / ${pg.heightIn}`;
+  pg.boxes.forEach((b, i) => {
+    if (b.tab) stage.append(tabOutline(pg, b));
+    const node = boxEl(pg, b, i);
+    if (skipped) node.classList.add('skipped');
+    stage.append(node);
+  });
+  const tools = el('div', { className: 'page-tools' }, el('span', { className: 'caption', textContent: pageCaption(pg) }));
+  if (skipped) {
+    const include = el('button', { type: 'button', className: 'btn btn-ghost btn-sm', textContent: 'include' });
+    include.setAttribute('aria-label', `include page ${pg.page}: print it as a label`);
+    include.dataset.tool = 'include';
+    include.addEventListener('click', () => { pg.edited = true; markEdited(pg); focusTool(pg, 'reset'); });
+    tools.append(include);
+  }
+  if (pg.edited) {
+    const reset = el('button', { type: 'button', className: 'btn btn-ghost btn-sm', textContent: 'reset' });
+    reset.setAttribute('aria-label', `reset page ${pg.page}`);
+    reset.dataset.tool = 'reset';
+    reset.addEventListener('click', () => { resetPage(pg); focusTool(pg, 'include'); });
+    tools.append(reset);
+  }
+  if (!pg.boxes.length) tools.append(el('span', { className: 'badge badge-warning', textContent: 'no labels' }));
+  const fig = el('figure', { className: 'pdf-page' },
+    el('div', { className: 'page-col' }, stage, tools),
+    el('div', { className: 'labels-col' }, ...labelFigures(pg)));
+  fig.dataset.page = pg.page;
+  return fig;
+}
+
+// The page is redrawn on every change, so a button that swaps for another
+// (include ↔ reset) hands keyboard focus to its replacement.
+function focusTool(pg, tool) {
+  $('preview-grid').querySelector(`.pdf-page[data-page="${pg.page}"] [data-tool="${tool}"]`)?.focus();
+}
+
+function place(node, b) {
+  Object.assign(node.style, { left: `${b.x * 100}%`, top: `${b.y * 100}%`, width: `${b.w * 100}%`, height: `${b.h * 100}%` });
+}
+
+function boxEl(pg, b, i) {
+  const node = el('div', { className: 'crop' });
+  node.dataset.page = pg.page;
+  node.dataset.index = i;
+  place(node, b);
+  node.append(el('span', { className: 'crop-num', textContent: i + 1 }));
+  return node;
+}
+
+function tabOutline(pg, b) {
+  const node = el('div', { className: 'crop-tab' + (b.choice === 'off' ? '' : ' on'), title: 'doc tab' });
+  place(node, b.tab);
+  return node;
+}
+
+// What shrinking a label to fit does to its barcodes. Carriers ask for true
+// size; a 15 mil module at 87% is 13 mil, the USPS floor.
+const SCALE_WARN = 0.95;
+const SCALE_BAD = 0.87;
+function scaleNote(scale) {
+  if (!(scale < SCALE_WARN)) return '';
+  const pct = Math.round(scale * 100);
+  return scale < SCALE_BAD
+    ? ` · scaled to ${pct}% — barcodes likely won't scan; check the label box or the label size`
+    : ` · scaled to ${pct}%, barcodes may not scan`;
+}
+
+function labelNote(li) {
+  if (!li) return 'not previewed';
+  if (li.method === 'native') return `original ${li.ppi} dpi bitmap, unscaled`;
+  const m = state.pdf.media;
+  return (m ? `rendered for ${fmtIn(m.w)} × ${fmtIn(m.h)} in` : 'rendered') + scaleNote(li.scale);
+}
+
+function labelFigures(pg) {
+  const flat = flatBoxes(pg);
+  return flat.map((b, k) => {
+    const li = pg.labelImages[k];
+    const name = `label ${k + 1}${flat.length > 1 ? `/${flat.length}` : ''}`;
+    const fig = el('figure', { className: 'preview-item label-item' });
+    if (li) fig.append(el('img', { src: li.image, alt: name, loading: 'lazy' }));
+    const cap = el('figcaption', { textContent: `${name} · ${labelNote(li)}` });
+    if (li && li.scale < SCALE_WARN) cap.classList.add('warn');
+    fig.append(cap);
+    return fig;
+  });
+}
+
 // the zpl itself, collapsed unless there's no picture to look at
 function zplSource(open) {
   const pre = el('pre', { className: 'preview-zpl', tabIndex: 0 });
@@ -228,31 +456,44 @@ function zplSource(open) {
   });
 }
 
-function updateSummary(r) {
+function updateSummary() {
   const btn = $('print');
   const copies = parseInt($('copies').value, 10);
   const copiesOK = copies >= 1 && copies <= state.maxCopies;
   if (copiesOK) $('copies').removeAttribute('aria-invalid');
   else $('copies').setAttribute('aria-invalid', 'true');
-  btn.disabled = !state.kind || !copiesOK;
+  const empty = state.kind === 'pdf' ? emptyPages() : [];
+  btn.disabled = !state.kind || !copiesOK || empty.length > 0;
   const sum = $('summary');
   if (!state.file) { sum.textContent = 'choose a file to start'; return; }
   if (!state.kind) { sum.textContent = ''; return; }
   if (!copiesOK) { sum.textContent = `copies: 1 to ${state.maxCopies}`; return; }
   let units = 1;
-  let what = 'label';
-  if (state.kind === 'pdf') {
-    units = r?.selected ?? state.lastSelected ?? 1;
-    state.lastSelected = units;
-    what = 'page';
-  }
+  if (state.kind === 'pdf') units = pdfLabelCount();
   const total = units * copies;
+  if (empty.length) {
+    sum.textContent = `page ${empty[0].page} has no labels — add one, reset it, or leave it out of the page range`;
+    return;
+  }
   sum.textContent = copies > 1 && units > 1
-    ? `${units} ${what}s × ${copies} copies = ${total} labels`
+    ? `${units} labels × ${copies} copies = ${total} labels`
     : `${total} label${total === 1 ? '' : 's'}`;
 }
 $('copies').addEventListener('input', () => updateSummary());
-$('media').addEventListener('change', () => { if (state.kind === 'zpl') preview(); });
+
+let previewTimer;
+function schedulePreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(preview, 450);
+}
+$('pages').addEventListener('input', () => { clearEdits(); schedulePreview(); });
+$('media').addEventListener('change', () => {
+  if (state.kind === 'pdf') clearEdits();
+  if (state.kind === 'zpl' || state.kind === 'pdf') preview();
+});
+for (const radio of document.querySelectorAll('input[name="layout"]')) {
+  radio.addEventListener('change', () => { state.layout = radio.value; clearEdits(); preview(); });
+}
 
 // ---------------------------------------------------------------- drag and drop
 
@@ -281,8 +522,8 @@ $('form').addEventListener('submit', async (e) => {
   btn.disabled = true;
   btn.textContent = 'printing…';
   showResult('info', state.kind === 'pdf' ? 'rendering and sending to lprint…' : 'sending to lprint…');
-  const fields = { copies: $('copies').value, pages: $('pages').value };
-  if (state.kind !== 'zpl') fields.media = $('media').value;
+  const fields = { ...requestFields(), copies: $('copies').value };
+  if (state.kind === 'zpl') delete fields.media;
   try {
     const r = await api('/api/print', { method: 'POST', body: formData(fields) });
     r.jobs.forEach((j) => state.mine.add(j.id));
