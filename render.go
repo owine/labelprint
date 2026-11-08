@@ -45,8 +45,6 @@ func (r *pdfRenderer) acquire(ctx context.Context) (release func(), err error) {
 	}
 }
 
-type pageImage struct{} // replaced in native.go (Task 7)
-
 // renderedPage is one page's PNG, in page order.
 type renderedPage struct {
 	Page int
