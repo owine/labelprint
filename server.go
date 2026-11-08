@@ -293,7 +293,10 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		}
 		p, err := s.zpl.render(r.Context(), up.Data, media, maxPreviewPages)
 		if err != nil {
-			s.log.Warn("zpl preview failed", "error", err)
+			// zebrash's drawer errors can quote field data (e.g. "can not
+			// encode %q"), so the log gets no error text; the page still
+			// shows the uploader why, since it's their own file.
+			s.log.Warn("zpl preview failed")
 			resp.PreviewError = err.Error()
 			break
 		}

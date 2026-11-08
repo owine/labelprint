@@ -22,6 +22,22 @@
       "registryUrls": [
         "https://dl-cdn.alpinelinux.org/alpine?branch=v3.24&components=main,community&arch=x86_64"
       ]
+    },
+    {
+      "description": "zebrash comes from github.com/Gobbo89/zebrash, a fork kept up by one person after github.com/ingridhq/zebrash stopped being maintained; it still pulls github.com/ingridhq/gg and github.com/ingridhq/maxicode from the same abandoned org. All three run in-process on untrusted uploads next to label data with names and addresses, so every update gets a human read of its diff before it merges: no automerge and a `needs-review` label. Their own groupName takes them out of :automerge's `all non-major dependencies` bundle, so holding these back doesn't hold back the rest. This rule doesn't cover vulnerability-fix PRs: the fleet's vulnerabilityAlerts config (automerge: true) is applied with `force`, which beats packageRules.",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "github.com/Gobbo89/zebrash",
+        "github.com/ingridhq/gg",
+        "github.com/ingridhq/maxicode"
+      ],
+      "groupName": "zebrash fork and ingridhq modules",
+      "automerge": false,
+      "addLabels": [
+        "needs-review"
+      ]
     }
   ]
 }

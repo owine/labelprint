@@ -49,8 +49,10 @@ Some details that aren't obvious:
 
 The preview is drawn in the container too, for up to 12 pages or labels:
 
-- **ZPL** is drawn by [zebrash](https://github.com/ingridhq/zebrash), a pure-Go emulation of the ZPL engine that
-  handles MaxiCode, PDF417, Code 128, `^GF` graphics and more. It's an emulation, so fonts can differ slightly from
+- **ZPL** is drawn by [zebrash](https://github.com/Gobbo89/zebrash), a pure-Go emulation of the ZPL engine that
+  handles MaxiCode, PDF417, Code 128, EAN-8/13, `^GF` graphics and more. That's the maintained fork: the original
+  [ingridhq/zebrash](https://github.com/ingridhq/zebrash) stopped getting updates in 2026, and the fork carries its
+  bug fixes and limits for malformed ZPL. It's an emulation, so fonts can differ slightly from
   the printer's; the printer always gets the original ZPL. The canvas uses the label's own `^PW`/`^LL` when set, and
   the size dropdown otherwise, which is the dropdown's only job for ZPL. Labels drawn with `^POI` (printed rotated
   180°) are shown upright. If zebrash can't draw a label, the page says why and shows the source; printing isn't
@@ -155,4 +157,5 @@ rebuilding.
 MIT, see [LICENSE](LICENSE). The bundled web fonts are under the SIL Open Font License: Geist and Geist Mono
 ([`OFL-geist.txt`](web/fonts/OFL-geist.txt), [`OFL-geistmono.txt`](web/fonts/OFL-geistmono.txt)) and Instrument
 Serif ([`OFL-instrumentserif.txt`](web/fonts/OFL-instrumentserif.txt)). ZPL previews use
-[zebrash](https://github.com/ingridhq/zebrash) (MIT).
+[zebrash](https://github.com/Gobbo89/zebrash) (MIT), the maintained fork of
+[ingridhq/zebrash](https://github.com/ingridhq/zebrash).
