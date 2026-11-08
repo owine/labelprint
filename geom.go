@@ -149,3 +149,66 @@ func parsePageGeoms(out []byte, n int) ([]pageGeom, error) {
 	}
 	return g, nil
 }
+
+// minBoxIn is the smallest side a crop may have: 0.5 in, less slack for
+// fractions sent with 4 decimals.
+const minBoxIn = 0.49
+
+func parseLayout(v string) (string, error) {
+	switch v {
+	case "", "auto":
+		return "auto", nil
+	case "page":
+		return "page", nil
+	}
+	return "", fieldError("layout", "label area must be auto or page")
+}
+
+// parseCrops reads the crops field: page number → boxes, for selected pages
+// only (other entries are ignored, unchecked).
+func parseCrops(v string, selected []int, inches func(page int) (w, h float64)) (map[int][]box, error) {
+	if v == "" {
+		return nil, nil
+	}
+	var raw map[string][][]float64
+	if err := json.Unmarshal([]byte(v), &raw); err != nil {
+		return nil, fieldError("crops", "the label boxes couldn't be read: %v", err)
+	}
+	sel := map[int]bool{}
+	for _, p := range selected {
+		sel[p] = true
+	}
+	out := map[int][]box{}
+	for k, list := range raw {
+		p, err := strconv.Atoi(k)
+		if err != nil {
+			return nil, fieldError("crops", "%q isn't a page number", k)
+		}
+		if !sel[p] {
+			continue
+		}
+		if len(list) == 0 {
+			return nil, fieldError("crops", "page %d has no label boxes", p)
+		}
+		if len(list) > maxBoxesPerPage {
+			return nil, fieldError("crops", "page %d has %d label boxes; the most is %d", p, len(list), maxBoxesPerPage)
+		}
+		pw, ph := inches(p)
+		for i, a := range list {
+			if len(a) != 4 {
+				return nil, fieldError("crops", "box %d on page %d needs 4 numbers", i+1, p)
+			}
+			b := box{a[0], a[1], a[2], a[3]}
+			if !b.valid() {
+				return nil, fieldError("crops", "box %d on page %d runs off the page", i+1, p)
+			}
+			if b.W*pw < minBoxIn || b.H*ph < minBoxIn {
+				return nil, fieldError("crops", "box %d on page %d is too small (under 0.5 in)", i+1, p)
+			}
+			b.X, b.Y = max(b.X, 0), max(b.Y, 0)
+			b.W, b.H = min(b.W, 1-b.X), min(b.H, 1-b.Y)
+			out[p] = append(out[p], b)
+		}
+	}
+	return out, nil
+}

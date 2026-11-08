@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -69,5 +70,44 @@ func TestBoxPixels(t *testing.T) {
 	}
 	if i, ok := b.intersect(box{X: 0.5, Y: 0, W: 1, H: 1}); !ok || !near(i.W, 0.1, 1e-12) {
 		t.Fatalf("intersect = %+v %v", i, ok)
+	}
+}
+
+func TestParseCrops(t *testing.T) {
+	inch := func(int) (float64, float64) { return 8.5, 11 }
+	sel := []int{1, 2}
+	got, err := parseCrops(`{"1": [[0.1, 0.1, 0.5, 0.5]], "7": [[0,0,0.01,0.01]]}`, sel, inch)
+	if err != nil || len(got) != 1 || got[1][0] != (box{0.1, 0.1, 0.5, 0.5}) {
+		t.Fatalf("%v %v (page 7 isn't selected: ignored, even though invalid)", got, err)
+	}
+	if got, err := parseCrops("", sel, inch); got != nil || err != nil {
+		t.Fatal("empty means none")
+	}
+	bad := map[string]string{
+		"not json":   `{`,
+		"page key":   `{"x": [[0,0,1,1]]}`,
+		"empty list": `{"1": []}`,
+		"three nums": `{"1": [[0,0,1]]}`,
+		"off page":   `{"1": [[0.6,0,0.5,0.5]]}`,
+		"too small":  `{"1": [[0,0,0.05,0.5]]}`,
+		"nine boxes": `{"1": [` + strings.Repeat(`[0,0,0.1,0.1],`, 8) + `[0,0,0.1,0.1]]}`,
+	}
+	for name, v := range bad {
+		if _, err := parseCrops(v, sel, inch); err == nil {
+			t.Errorf("%s: no error", name)
+		} else if ue, ok := err.(*userError); !ok || ue.Field != "crops" {
+			t.Errorf("%s: error %v isn't tagged crops", name, err)
+		}
+	}
+}
+
+func TestParseLayout(t *testing.T) {
+	for in, want := range map[string]string{"": "auto", "auto": "auto", "page": "page"} {
+		if got, err := parseLayout(in); got != want || err != nil {
+			t.Errorf("%q: %q %v", in, got, err)
+		}
+	}
+	if _, err := parseLayout("x"); err == nil {
+		t.Error("unknown layout accepted")
 	}
 }
