@@ -498,3 +498,39 @@ func fixSmallLabel() []byte {
 	p.vectorLabel(2.75, 3, 3, 5)
 	return b.bytes()
 }
+
+// A store's return on Letter portrait: instructions, then the carrier's
+// 1400×800 1-bit label image at 183 ppi with a 1 pt frame stroked round it,
+// as an HTML page draws one, and an instructions page after it. The image
+// has its doc tab first: bars at x 20–160, a gutter, then the label at x
+// 320–1390 with a 30 px white band through it at x 1100.
+func fixFramedTabFirst() []byte {
+	var b pdfBuilder
+	p := b.page(letter, 0)
+	p.text(0.5, 0.75, 16, "Return Label")
+	p.paragraph(0.5, 1.2, 8, 80)
+	im := newBitmap(1400, 800)
+	for x := 20; x+3 <= 160; x += 6 {
+		im.fill(x, 200, x+3, 600)
+	}
+	im.fill(320, 20, 1100, 80) // the label: a heading, a corner block, address lines and bars
+	im.fill(320, 120, 420, 220)
+	for y := 260; y < 460; y += 40 {
+		im.fill(460, y, 1000, y+16)
+	}
+	for i := range 40 {
+		x := 340 + i*18
+		im.fill(x, 520, x+4+i%3*2, 780)
+	}
+	im.fill(1130, 20, 1390, 300) // past the band: the label's own end (a box and a code)
+	im.fill(1130, 500, 1390, 780)
+	ppi := 183.0
+	x, y, w, h := 0.4, 5.5, 1400/ppi, 800/ppi
+	p.image(im, x, y, w, h, 0)
+	p.strokeRect(x, y, w, h, 1)
+	p = b.page(letter, 0)
+	for _, y := range []float64{1, 4.5, 8} {
+		p.paragraph(1, y, 5, 70)
+	}
+	return b.bytes()
+}

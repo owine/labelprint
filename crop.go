@@ -182,6 +182,10 @@ func (d *detector) cut(r image.Rectangle) {
 	case len(rows) > 0:
 		pieces = split(t, rows, false)
 	default:
+		// No gutters: a frame round the block may be what's crossing them.
+		if u := d.unframe(t); u != t {
+			d.cut(u)
+		}
 		return
 	}
 	for _, p := range pieces {
@@ -255,9 +259,70 @@ func (d *detector) tabSplit(t image.Rectangle) (found, bool) {
 			pad := min(d.padPx(), (g.b-g.a)/2)
 			mr, _ := d.trim(along(t, main, vertical))
 			tr, _ := d.trim(along(t, tab, vertical))
+			// A doc tab is about an inch: a longer "tab" is the label's own
+			// end, cut off at one of its internal white bands.
+			tl := tr.Dy()
+			if vertical {
+				tl = tr.Dx()
+			}
+			if d.inches(tl) > 0.2*mLong {
+				continue
+			}
 			tr = d.pad(tr, pad)
 			best, bestErr = found{box: d.pad(mr, pad), tab: &tr}, math.Abs(l-1)
 		}
 	}
 	return best, !math.IsInf(bestErr, 1)
+}
+
+// unframe strips a frame drawn round a block: when both opposite edges
+// (top and bottom, or left and right) are lines at most 0.06 in thick whose
+// ink spans at least 90% of the block, it drops them. A frame (an HTML
+// page's border round an embedded label image, say) otherwise crosses every
+// gutter, so the block can't be split. The result is trimmed; it's t itself
+// when there's no frame.
+func (d *detector) unframe(t image.Rectangle) image.Rectangle {
+	maxPx := int(math.Ceil(0.06 * d.dpi))
+	full := func(r image.Rectangle, i int, vertical bool) bool {
+		n, total := 0, r.Dx()
+		if vertical {
+			total = r.Dy()
+			for y := r.Min.Y; y < r.Max.Y; y++ {
+				if d.at(i, y) {
+					n++
+				}
+			}
+		} else {
+			for x := r.Min.X; x < r.Max.X; x++ {
+				if d.at(x, i) {
+					n++
+				}
+			}
+		}
+		return total > 0 && 10*n >= 9*total
+	}
+	// line is the thickness of the edge line starting at i and stepping by
+	// step, or 0 when there's none or it's thicker than a line.
+	line := func(r image.Rectangle, i, step int, vertical bool) int {
+		for n := 0; n <= maxPx; n++ {
+			if !full(r, i+n*step, vertical) {
+				return n
+			}
+		}
+		return 0
+	}
+	r := t
+	if a, b := line(r, r.Min.Y, 1, false), line(r, r.Max.Y-1, -1, false); a > 0 && b > 0 && a+b < r.Dy() {
+		r.Min.Y, r.Max.Y = r.Min.Y+a, r.Max.Y-b
+	}
+	if a, b := line(r, r.Min.X, 1, true), line(r, r.Max.X-1, -1, true); a > 0 && b > 0 && a+b < r.Dx() {
+		r.Min.X, r.Max.X = r.Min.X+a, r.Max.X-b
+	}
+	if r == t {
+		return t
+	}
+	if u, ok := d.trim(r); ok {
+		return u
+	}
+	return t
 }

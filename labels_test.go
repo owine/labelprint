@@ -280,6 +280,26 @@ func TestPlanDocTabs(t *testing.T) {
 	}
 }
 
+func TestPlanFramedTabFirst(t *testing.T) {
+	ctx := context.Background()
+	doc := openTest(t, fixFramedTabFirst())
+	pl := doc.plan(ctx, []int{1, 2}, opts46)
+	if pl[0].Fallback || len(pl[0].Boxes) != 1 || len(pl[0].Tabs) != 1 || pl[0].Tabs[0] == nil {
+		t.Fatalf("fallback %v boxes %v tabs %v", pl[0].Fallback, pl[0].Boxes, pl[0].Tabs)
+	}
+	// the image is at (0.4, 5.5) in, 183 ppi: the label is its x 320–1390, y 20–780
+	const ppi = 183.0
+	wantBoxIn(t, doc, 1, pl[0].Boxes[0], 0.4+320/ppi, 5.5+20/ppi, 1070/ppi, 760/ppi)
+	// and the tab its bars, x 20–160, y 200–600
+	wantBoxIn(t, doc, 1, *pl[0].Tabs[0], 0.4+20/ppi, 5.5+200/ppi, 140/ppi, 400/ppi)
+	if !pl[1].Skip {
+		t.Error("the instructions page after the label should be left out")
+	}
+	if _, err := doc.label(ctx, 1, pl[0].Boxes[0], opts46); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPlanOverrides(t *testing.T) {
 	ctx := context.Background()
 	doc := openTest(t, makeLabelPDF(2))

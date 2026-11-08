@@ -107,3 +107,107 @@ func TestDetectDocTab(t *testing.T) {
 		t.Fatal("a gutter under 0.1 in must not split")
 	}
 }
+
+// outline is a w-px-thick rectangle outline drawn just outside r: top and
+// bottom lines, plus the sides when sides is true.
+func outline(r image.Rectangle, w int, sides bool) []image.Rectangle {
+	o := r.Inset(-w)
+	out := []image.Rectangle{
+		image.Rect(o.Min.X, o.Min.Y, o.Max.X, r.Min.Y),
+		image.Rect(o.Min.X, r.Max.Y, o.Max.X, o.Max.Y),
+	}
+	if sides {
+		out = append(out, image.Rect(o.Min.X, r.Min.Y, r.Min.X, r.Max.Y), image.Rect(r.Max.X, r.Min.Y, o.Max.X, r.Max.Y))
+	}
+	return out
+}
+
+func TestDetectFramedBlock(t *testing.T) {
+	// A 6 × 4 in label and a 1 in block of other ink 0.6 in beside it, with a
+	// frame hugging both (2 px clear of them). The frame's lines cross the
+	// gutter between them, so the 7.8 in block can't be cut until it's gone.
+	label, other := image.Rect(40, 60, 340, 260), image.Rect(370, 100, 420, 150)
+	inside := image.Rect(38, 58, 422, 262)
+	for _, c := range []struct {
+		name  string
+		w     int
+		sides bool
+	}{
+		{"1 px top and bottom", 1, false},
+		{"2 px top and bottom", 2, false},
+		{"1 px all round", 1, true},
+		{"3 px all round", 3, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := maskOf(550, 425, append(outline(inside, c.w, c.sides), label, other)...)
+			got, fallback := detect46(m)
+			if fallback || len(got) != 1 {
+				t.Fatalf("got %+v fallback %v", got, fallback)
+			}
+			if want := image.Rect(38, 58, 342, 262); got[0].box != want || got[0].tab != nil {
+				t.Errorf("box = %v tab %v, want %v", got[0].box, got[0].tab, want)
+			}
+		})
+	}
+	// a 4 px border is a drawn box, not a hairline frame: left alone
+	m := maskOf(550, 425, append(outline(inside, 4, true), label, other)...)
+	if _, fallback := detect46(m); !fallback {
+		t.Error("a 4 px (0.08 in) border must not be stripped")
+	}
+}
+
+func TestDetectBorderedLabelsKeepTheirBorders(t *testing.T) {
+	// Two 4 × 6 in labels, each outlined by a 1 px hairline, side by side.
+	// Each is label-sized as it is, so its outline is part of it: stripping
+	// it as a frame would shift the box by a pixel.
+	var rects []image.Rectangle
+	for _, x := range []int{40, 315} {
+		r := image.Rect(x, 60, x+200, 360)
+		rects = append(rects, outline(r.Inset(1), 1, true)...)
+		rects = append(rects, image.Rect(x+20, 80, x+60, 120), image.Rect(x+20, 200, x+180, 260))
+	}
+	got, fallback := detect46(maskOf(550, 425, rects...))
+	if fallback || len(got) != 2 {
+		t.Fatalf("got %+v fallback %v", got, fallback)
+	}
+	for i, x := range []int{40, 315} {
+		if want := image.Rect(x-2, 58, x+202, 362); got[i].box != want {
+			t.Errorf("box %d = %v, want %v", i, got[i].box, want)
+		}
+	}
+}
+
+func TestDetectDocTabAtStart(t *testing.T) {
+	// A label image with its doc tab first: a 0.76 in tab, a 0.94 in gutter,
+	// then a 5.92 × 4.36 in label with a 0.18 in white band through it 1.5 in
+	// from its end. Split at the band, the part before it is nearer 6 in than
+	// the label, but what's left over (1.52 in) is too long to be a doc tab.
+	// The label's ink stops 2 px short of the image's right edge, as real
+	// labels' margins do: ink running into a frame's side makes that side
+	// look thicker than a line, and it isn't stripped.
+	img := image.Rect(18, 300, 402, 518)
+	tab := image.Rect(18, 340, 56, 480)
+	label := []image.Rectangle{image.Rect(104, 300, 315, 518), image.Rect(324, 300, 400, 518)}
+	for _, framed := range []bool{false, true} {
+		rects := append([]image.Rectangle{tab}, label...)
+		name := "bare"
+		if framed { // and a 1 px frame round the image, as an HTML page draws it
+			rects, name = append(rects, outline(img, 1, true)...), "framed"
+		}
+		t.Run(name, func(t *testing.T) {
+			got, fallback := detect46(maskOf(425, 550, rects...), img)
+			if fallback || len(got) != 1 || got[0].tab == nil {
+				t.Fatalf("got %+v fallback %v", got, fallback)
+			}
+			if want := image.Rect(102, 298, 402, 520); got[0].box != want {
+				t.Errorf("box = %v, want %v (the whole label)", got[0].box, want)
+			}
+			if want := image.Rect(16, 338, 58, 482); *got[0].tab != want {
+				t.Errorf("tab = %v, want %v", *got[0].tab, want)
+			}
+			if w := float64(got[0].tab.Dx()) / 50; w >= 1.2 {
+				t.Errorf("tab is %.2f in long", w)
+			}
+		})
+	}
+}
