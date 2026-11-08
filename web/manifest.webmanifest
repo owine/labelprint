@@ -1,0 +1,35 @@
+{
+  "id": "/",
+  "name": "labelprint",
+  "short_name": "labelprint",
+  "description": "Preview and print shipping labels on the label printer.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f4ef",
+  "theme_color": "#f6f4ef",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "share_target": {
+    "action": "/share",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "files": [
+        {
+          "name": "file",
+          "accept": [
+            "application/pdf", ".pdf",
+            "image/png", ".png",
+            "image/jpeg", ".jpg", ".jpeg",
+            "application/vnd.zebra-zpl", ".zpl",
+            "text/plain", ".txt"
+          ]
+        }
+      ]
+    }
+  }
+}

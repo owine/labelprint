@@ -22,6 +22,7 @@ example stack. The repo is public: keep real hostnames, addresses and deployment
 | `media.go` | turns LPrint's `media-supported` PWG names into dropdown labels and sizes |
 | `server.go` | HTTP handlers, upload limits, the print flow, cross-origin protection, security headers |
 | `maintenance.go` | `POST /api/printer/maintenance`: "feed a label" as a ZPL job (a one-dot box). No remote calibrate: that's SmartCal at the printer |
+| `share.go` | phone sharing: `POST /share` holds a checked upload in memory under a one-time token for the page's preview |
 | `web/` | the page: vanilla JS, owine design tokens (`tokens.css`), vendored fonts. No build step |
 
 ## Constraints that shaped the code
@@ -48,6 +49,11 @@ Verified against the live LPrint (Get-Printer-Attributes) and the LPrint/PAPPL s
   aborted job with `client-error-not-possible`, and an unknown id with `client-error-not-found`; those messages are
   shown as LPrint sent them. A processing job only stops at its next page, so it can read "processing" for a moment
   after a successful cancel. Without an LPrint `auth-service`, PAPPL doesn't check that the canceller owns the job.
+- A share (`/share`, the manifest's `share_target`) only stages a file for the preview and never prints. Shares stay
+  in memory, single use, for at most 10 minutes. `web/sw.js` has no fetch handler on purpose. Without any service
+  worker, Android Chrome loads the start page and waits up to 5 s before sending a share. A fetch handler would see
+  every request, and must never cache anything. The app icons are `web/favicon.svg` rasterised with
+  `rsvg-convert` (192 and 512 px). The maskable icon is the same mark without the rounded corners.
 
 Never send to port 9100 directly. Every job must go through LPrint so it appears in LPrint's job list.
 

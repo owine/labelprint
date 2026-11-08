@@ -12,8 +12,9 @@ The uploads it handles are shipping labels, which carry names and addresses. Its
 - **No outside services.** PDFs are rendered with poppler and ZPL with zebrash, both inside the container. The page
   loads nothing third-party; the Content-Security-Policy is `default-src 'self'`.
 - **Nothing kept.** Uploads are held in memory for the request. A PDF is written to `/tmp` (a tmpfs in the example
-  compose) only while it renders, then deleted. Logs record the file type, size, copies, media and job ids, not
-  file names or contents.
+  compose) only while it renders, then deleted. A file shared from a phone is held in memory under a random
+  one-time link until the page collects it, for 10 minutes at most. Logs record the file type, size, copies, media
+  and job ids, not file names, share links or contents.
 - **Cross-site requests are refused.** An auth proxy's session cookie goes with every request to the host, so
   labelprint rejects state-changing requests from other sites (Go's `http.CrossOriginProtection`).
 - **Hardened container.** It runs as uid 65532, works with a read-only root filesystem and all capabilities dropped,

@@ -125,6 +125,12 @@ func (f *fakeLPrint) ops(op uint16) []*ippMessage {
 
 func newTestServer(t *testing.T, mutate ...func(*config)) (*fakeLPrint, http.Handler) {
 	t.Helper()
+	fake, s := newTestServerS(t, mutate...)
+	return fake, s.routes()
+}
+
+func newTestServerS(t *testing.T, mutate ...func(*config)) (*fakeLPrint, *server) {
+	t.Helper()
 	fake := &fakeLPrint{t: t}
 	lp := httptest.NewServer(fake)
 	t.Cleanup(lp.Close)
@@ -144,8 +150,9 @@ func newTestServer(t *testing.T, mutate ...func(*config)) (*fakeLPrint, http.Han
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &server{cfg: cfg, ipp: ipp, pdf: newPDFRenderer(cfg.DPI), zpl: newZPLRenderer(cfg.DPI), log: slog.New(slog.DiscardHandler)}
-	return fake, s.routes()
+	s := &server{cfg: cfg, ipp: ipp, pdf: newPDFRenderer(cfg.DPI), zpl: newZPLRenderer(cfg.DPI),
+		shares: newShareStore(cfg.MaxUpload), log: slog.New(slog.DiscardHandler)}
+	return fake, s
 }
 
 func multipartBody(t *testing.T, filename string, data []byte, fields map[string]string) (*bytes.Buffer, string) {

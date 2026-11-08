@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>labelprint</title>
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <!-- use-credentials: manifests are fetched without cookies otherwise, which an auth proxy turns away -->
+  <link rel="manifest" href="manifest.webmanifest" crossorigin="use-credentials">
   <!-- sets data-theme before css applies, so dark mode doesn't flash white -->
   <script src="theme.js"></script>
   <link rel="stylesheet" href="tokens.css">

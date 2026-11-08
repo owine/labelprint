@@ -70,6 +70,40 @@ can't be used to send arbitrary ZPL.
 the light flashes twice, then let go. There's no remote calibrate on purpose. Sending `~JC` through LPrint left the
 printer jammed, and nobody was there to clear it.
 
+## Sharing from a phone
+
+Return labels usually arrive by email. Instead of saving the attachment and uploading it, share it straight to
+labelprint. A share always lands on the preview: you check it and press print. Nothing prints from a share alone.
+
+Both platforms use the same hand-off. The phone POSTs the file to `/share`, which checks it like an upload and holds
+it in memory under a one-time link (`/?share=<token>`). The page collects it from there and shows the preview. A
+shared file is never written to disk. It's dropped once the page has collected it, or after 10 minutes. labelprint
+holds at most 8 shares and 4× the upload cap in total, and drops the oldest share to make room.
+
+**Android (Chrome).** Open labelprint in Chrome and choose **Add to Home screen** (or **Install app**) from the menu.
+It needs HTTPS. The installed app then appears in the share sheet for PDFs, PNGs, JPEGs and `.zpl`/`.txt` files. The
+installed app shares Chrome's cookies, so stay signed in to your auth proxy. If the proxy sends the share to a login
+page, the file is lost, so open the app once to sign in, then share again.
+
+**iPhone (Shortcuts).** Safari can't be a share target, so use a Shortcut:
+
+1. Create a shortcut. In its details, turn on **Show in Share Sheet** and accept **PDFs**, **Images** and **Files**.
+2. **Get Contents of URL**: `https://<your labelprint>/share`, method **POST**, request body **Form** with one
+   **File** field named `file` set to **Shortcut Input**. Add a header `Accept: application/json`, plus whatever
+   your auth proxy needs (see below).
+3. **Get Dictionary Value** `url` from **Contents of URL**. It's a path like `/?share=…`.
+4. **Text**: `https://<your labelprint>` followed by **Dictionary Value**, then **Open URLs** with that text.
+
+Safari opens the preview. With `Accept: application/json`, `/share` answers `{"url": "/?share=<token>"}` instead
+of redirecting, and errors come back as `{"error": "…"}`, which the shortcut shows.
+
+> [!NOTE]
+> A Shortcut doesn't carry Safari's cookies, so your auth proxy has to let it through some other way, and how
+> depends on the proxy. Options include a header or token the proxy accepts for this one path, or a rule that
+> passes `POST /share` from your LAN or VPN without a login. Anyone the proxy lets through can stage files. They
+> can't print, and they can't read a share without its link, but they can push your pending share out early by
+> filling the 8 slots. Opening the link in Safari still goes through your normal login.
+
 ## Configuration
 
 All settings are environment variables. Only `LPRINT_URI` is required.
