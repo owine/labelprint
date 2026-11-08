@@ -87,7 +87,7 @@ function renderPrinter(p) {
 
 function fillMedia(p) {
   const sel = $('media');
-  const keep = sel.value;
+  const keep = mediaChoice || pref.get(PREF_MEDIA) || sel.value;
   sel.replaceChildren();
   for (const m of p.media) {
     sel.append(el('option', { value: m.name, textContent: m.label + (m.ready ? ' · loaded' : '') }));
@@ -288,6 +288,7 @@ $('form').addEventListener('submit', async (e) => {
     r.jobs.forEach((j) => state.mine.add(j.id));
     state.lastResult = r;
     renderPrintResult();
+    resetCopies(fields.copies);
   } catch (err) {
     const sent = err.body?.jobs || [];
     sent.forEach((j) => state.mine.add(j.id));
@@ -397,6 +398,67 @@ function renderJobs(jobs) {
   }));
 }
 
+// ---------------------------------------------------------------- paste
+
+// A file on the clipboard (a copied pdf, a screenshot) loads like a drop. In a
+// text field the field gets the paste if there's text for it, so pasting into
+// pages or copies works as usual; a file with no text (a screenshot) still
+// loads, since the field couldn't take it anyway.
+document.addEventListener('paste', (e) => {
+  const f = e.clipboardData?.files?.[0];
+  if (!f) return;
+  const field = e.target.closest?.('input:not([type=file]), textarea, [contenteditable]');
+  if (field && e.clipboardData.types.includes('text/plain')) return;
+  e.preventDefault();
+  chooseFile(f);
+});
+
+// ---------------------------------------------------------------- remembered settings
+
+// Per browser, like the theme. Only the size and the copies count are kept,
+// nothing about the file. The size applies only while lprint still lists it
+// (fillMedia checks); copies go back to 1 once a print succeeds, so a ×3
+// can't carry over to the next label by accident.
+const PREF_MEDIA = 'labelprint-media';
+const PREF_COPIES = 'labelprint-copies';
+const pref = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* storage blocked */ } },
+  del(k) { try { localStorage.removeItem(k); } catch { /* storage blocked */ } },
+};
+
+// The size picked in this tab. fillMedia falls back to the default while
+// lprint doesn't list it, and puts it back when lprint lists it again; until
+// something is picked here, the saved size plays that part (so it still lands
+// if lprint was unreachable when the page loaded).
+let mediaChoice = null;
+$('media').addEventListener('change', () => {
+  mediaChoice = $('media').value;
+  pref.set(PREF_MEDIA, mediaChoice);
+});
+
+// whole numbers only: the server refuses anything else, so "2.5" isn't saved as 2
+const wholeCopies = (v) => (/^\d+$/.test(v.trim()) ? parseInt(v, 10) : NaN);
+
+$('copies').addEventListener('input', () => {
+  const n = wholeCopies($('copies').value);
+  if (n === 1) pref.del(PREF_COPIES);
+  else if (n > 1 && n <= state.maxCopies) pref.set(PREF_COPIES, String(n));
+});
+
+// After a successful print, unless the count was changed while it was sending.
+function resetCopies(sent) {
+  if ($('copies').value !== sent) return;
+  $('copies').value = '1';
+  pref.del(PREF_COPIES);
+}
+
+// Called once the real copies limit (MAX_COPIES) has come from /api/printer.
+function restoreCopies() {
+  const n = wholeCopies(pref.get(PREF_COPIES) || '');
+  if (n > 1 && n <= state.maxCopies) $('copies').value = String(n);
+}
+
 // ---------------------------------------------------------------- theme
 
 $('theme').addEventListener('click', () => {
@@ -415,6 +477,8 @@ $('theme').addEventListener('click', () => {
     $('max-mb').textContent = p.maxUploadMB;
     $('copies').max = p.maxCopies;
   }
+  restoreCopies();
+  updateSummary();
   fillMedia(p || { media: [{ name: 'na_index-4x6_4x6in', label: '4 × 6 in' }], defaultMedia: 'na_index-4x6_4x6in' });
   loadJobs();
   setInterval(async () => { const q = await loadPrinter(); if (q) fillMedia(q); }, 30000);

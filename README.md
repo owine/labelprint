@@ -1,7 +1,8 @@
 # labelprint
 
-A one-page web app for printing shipping labels on a Zebra label printer. Drop in a ZPL, PDF, PNG or JPEG file,
-check the preview, pick copies and a label size, and press print. Every job goes to
+A one-page web app for printing shipping labels on a Zebra label printer. Drop in a ZPL, PDF, PNG or JPEG file
+(or paste one, or a screenshot), check the preview, pick copies and a label size, and press print. The page remembers
+the label size and copies in your browser; copies go back to 1 after each successful print. Every job goes to
 [LPrint](https://www.msweet.org/lprint/) over IPP, so it shows up in LPrint's own job list. Previews and PDF rendering
 happen inside the container; nothing is sent to an outside service, which matters for labels full of names and
 addresses.
