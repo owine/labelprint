@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -190,6 +191,9 @@ func requirePoppler(t *testing.T) {
 	t.Helper()
 	for _, tool := range []string{"pdfinfo", "pdftoppm", "pdfimages", "pdftohtml"} {
 		if _, err := exec.LookPath(tool); err != nil {
+			if os.Getenv("CI") != "" {
+				t.Fatalf("%s not installed: CI must run the PDF tests", tool)
+			}
 			t.Skipf("%s not installed (poppler-utils)", tool)
 		}
 	}

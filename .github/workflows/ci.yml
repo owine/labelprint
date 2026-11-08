@@ -75,11 +75,9 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # The PDF tests shell out to pdfinfo/pdftoppm and skip without them.
-      - name: Install poppler
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends poppler-utils
+      # The PDF tests shell out to poppler; requirePoppler fails (not skips) when CI is set.
+      - name: Install poppler (the PDF tests need pdfinfo, pdftoppm, pdfimages, pdftohtml)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
 
       - name: Test
         run: go test -race -count=1 ./...
