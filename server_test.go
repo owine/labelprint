@@ -474,6 +474,64 @@ func TestPreviewNativeAndCrops(t *testing.T) {
 	}
 }
 
+func TestPreviewLabelScale(t *testing.T) {
+	requirePoppler(t)
+	_, h := newTestServer(t)
+	scales := func(pdf []byte) []float64 {
+		t.Helper()
+		rec, out := post(t, h, "/api/preview", "x.pdf", pdf, nil)
+		if rec.Code != 200 {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body)
+		}
+		var s []float64
+		for _, li := range out["pages"].([]any)[0].(map[string]any)["labelImages"].([]any) {
+			v, ok := li.(map[string]any)["scale"].(float64)
+			if !ok {
+				t.Fatalf("label %v has no scale", li)
+			}
+			s = append(s, v)
+		}
+		return s
+	}
+	if s := scales(fixWide()); len(s) != 1 || s[0] >= 1 || s[0] < 0.9 {
+		t.Errorf("wide label scales = %v, want one just under 1", s)
+	}
+	if s := scales(fixUPS2up(true, 200)); len(s) != 2 || s[0] != 1 || s[1] != 1 {
+		t.Errorf("native label scales = %v, want 1 each", s)
+	}
+}
+
+func TestPreviewAndPrintSkipPagesWithNoLabel(t *testing.T) {
+	requirePoppler(t)
+	fake, h := newTestServer(t)
+	rec, out := post(t, h, "/api/preview", "x.pdf", fixLabelThenText(), nil)
+	if rec.Code != 200 || out["labels"] != 1.0 {
+		t.Fatalf("status %d labels %v: %s", rec.Code, out["labels"], rec.Body)
+	}
+	pages := out["pages"].([]any)
+	if p := pages[0].(map[string]any); p["skipped"] != nil || len(p["labelImages"].([]any)) != 1 {
+		t.Errorf("page 1 = skipped %v, %v label images", p["skipped"], p["labelImages"])
+	}
+	p := pages[1].(map[string]any)
+	if p["skipped"] != true || p["labelImages"] != nil || len(p["boxes"].([]any)) != 1 {
+		t.Errorf("page 2 should be skipped with its fallback box and no label images: %v", p)
+	}
+
+	if rec, _ := post(t, h, "/api/print", "x.pdf", fixLabelThenText(), nil); rec.Code != 200 {
+		t.Fatalf("print: status %d: %s", rec.Code, rec.Body)
+	}
+	if n := len(fake.printJobs()); n != 1 {
+		t.Fatalf("%d jobs, want 1: the skipped page sends none", n)
+	}
+	rec, _ = post(t, h, "/api/print", "x.pdf", fixLabelThenText(), map[string]string{"crops": `{"2": [[0,0,1,1]]}`})
+	if rec.Code != 200 {
+		t.Fatalf("print with crops: status %d: %s", rec.Code, rec.Body)
+	}
+	if n := len(fake.printJobs()); n != 3 {
+		t.Fatalf("%d jobs in all, want 3: including page 2 sends it", n-1)
+	}
+}
+
 func TestPrintPDFNamesEachLabel(t *testing.T) {
 	requirePoppler(t)
 	fake, h := newTestServer(t)

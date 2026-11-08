@@ -284,15 +284,17 @@ type previewPage struct {
 	HeightIn    float64        `json:"heightIn,omitempty"`
 	Auto        bool           `json:"auto,omitempty"`
 	Fallback    bool           `json:"fallback,omitempty"`
+	Skipped     bool           `json:"skipped,omitempty"` // no label here while other pages have one: not printing
 	Boxes       []box          `json:"boxes,omitempty"`
 	Tabs        []*box         `json:"tabs,omitempty"`
 	LabelImages []previewLabel `json:"labelImages,omitempty"`
 }
 
 type previewLabel struct {
-	Image  string `json:"image"`  // exactly what LPrint will receive
-	Method string `json:"method"` // native or render
-	PPI    int    `json:"ppi,omitempty"`
+	Image  string  `json:"image"`  // exactly what LPrint will receive
+	Method string  `json:"method"` // native or render
+	PPI    int     `json:"ppi,omitempty"`
+	Scale  float64 `json:"scale"` // against true size: 1, or below 1 when shrunk to fit
 }
 
 const (
@@ -430,7 +432,9 @@ func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewRespon
 	}
 	plans := doc.plan(ctx, pages, o)
 	for _, pl := range plans {
-		resp.Labels += len(pl.Boxes)
+		if !pl.Skip {
+			resp.Labels += len(pl.Boxes)
+		}
 	}
 	shown := plans[:min(len(plans), maxPreviewPages)]
 	shownPages := make([]int, len(shown))
@@ -445,9 +449,9 @@ func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewRespon
 	for _, pl := range shown {
 		pw, ph := doc.geom(pl.Page).inches()
 		pp := previewPage{Page: pl.Page, Image: dataURL(images[pl.Page]), WidthIn: round2(pw), HeightIn: round2(ph),
-			Auto: pl.Auto, Fallback: pl.Fallback, Boxes: pl.Boxes, Tabs: pl.Tabs}
+			Auto: pl.Auto, Fallback: pl.Fallback, Skipped: pl.Skip, Boxes: pl.Boxes, Tabs: pl.Tabs}
 		for _, b := range pl.Boxes {
-			if budget == 0 {
+			if budget == 0 || pl.Skip { // a skipped page's box isn't printing, so it gets no image
 				break
 			}
 			l, err := doc.label(ctx, pl.Page, b, o)
@@ -455,7 +459,7 @@ func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewRespon
 				return &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
 			}
 			pp.LabelImages = append(pp.LabelImages, previewLabel{Image: dataURL(l.PNG), Method: l.Method,
-				PPI: int(math.Round(l.PPI))})
+				PPI: int(math.Round(l.PPI)), Scale: round2(l.Scale)})
 			budget--
 		}
 		resp.Pages = append(resp.Pages, pp)
@@ -597,9 +601,13 @@ func (s *server) buildJobs(ctx context.Context, up *upload, copies int, media, u
 			return nil, err
 		}
 		// One job per label: LPrint takes a single document per job
-		// (multiple-document-jobs-supported = false).
+		// (multiple-document-jobs-supported = false). Skipped pages (no
+		// label, beside pages with one) send nothing.
 		var out []printRequest
 		for _, pl := range doc.plan(ctx, pages, o) {
+			if pl.Skip {
+				continue
+			}
 			for i, b := range pl.Boxes {
 				l, err := doc.label(ctx, pl.Page, b, o)
 				if err != nil {
