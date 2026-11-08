@@ -23,7 +23,7 @@ drives should work; set `RENDER_DPI` to match.
 | file | how it's detected | what LPrint receives |
 |---|---|---|
 | ZPL | `.zpl`, or any file containing `^XA` … `^XZ` (`.txt` must contain one) | the bytes, unchanged, as `application/vnd.zebra-zpl` |
-| PDF | `%PDF-` header | one job per page: an 8-bit grayscale PNG rendered at 203 dpi, `print-scaling=fit` and the chosen `media` |
+| PDF | `%PDF-` header | one job per label: the label boxes found on each page (or chosen in the preview), each a pure black/white PNG exactly the label's size, `print-scaling=fit` and the chosen `media` |
 | PNG / JPEG | magic bytes | the file unchanged, `print-scaling=fit` and the chosen `media` |
 
 Anything else is rejected, and so are uploads over 20 MB.
@@ -33,12 +33,13 @@ Some details that aren't obvious:
 - **ZPL copies are made here.** LPrint's ZPL driver sends raw ZPL straight to the printer and ignores the IPP `copies`
   attribute. For 3 copies, labelprint sends one job containing the ZPL three times. ZPL jobs carry no `media`
   either, because the ZPL sets its own size (`^PW`, `^LL`).
-- **PDFs become one job per page.** LPrint takes a single document per job (`multiple-document-jobs-supported` is
-  false). Page ranges (`1-3, 5`) are applied while rendering, because LPrint doesn't support `page-ranges`.
-  With copies, each page's job carries `copies=N`, so a 2-page PDF with 3 copies prints page 1 three times, then
-  page 2 three times.
-- **Rendering has anti-aliasing turned off** (`pdftoppm -aa no -aaVector no`). Gray barcode edges would come out of
-  LPrint's 1-bit dither fuzzy; hard edges at 203 dpi map one-to-one to printer dots.
+- **PDFs become one job per label.** LPrint takes a single document per job (`multiple-document-jobs-supported` is
+  false). Page ranges (`1-3, 5`) pick the pages first, since LPrint doesn't support `page-ranges`. With copies,
+  each label's job carries `copies=N`, so a 2-up page with 3 copies prints the first label three times, then the
+  second three times.
+- **Labels are pure black and white at the printer's dots.** A label is rendered to the label size at the printer's
+  resolution with anti-aliasing off, then thresholded. LPrint's dither has nothing to do, so barcode edges stay
+  crisp instead of speckled. A label is never enlarged: one smaller than the media prints at its own size, centred.
 - **Fonts that PDFs reference but don't embed**, as carrier labels often do with Helvetica, are drawn with Liberation
   Sans/Serif/Mono.
 - **"Sent" isn't "printed."** LPrint accepts a job even when the printer is offline or out of media and holds it.
@@ -59,6 +60,30 @@ The preview is drawn in the container too, for up to 12 pages or labels:
   affected.
 - **PDFs** show the pages exactly as they'll be sent: 203 dpi grayscale.
 - **PNG and JPEG** previews are drawn by your browser.
+
+## Label area (PDFs)
+
+Store and carrier PDFs often put the label on a Letter or A4 sheet, beside instructions, sometimes two to a
+page. labelprint finds the label-sized blocks on each page and prints each as its own label:
+
+- **auto** (the default) splits each page at its white gutters and keeps blocks between 0.6x and 1.2x the label
+  size. It sees through a thin frame drawn round a label image. A page with nothing label-sized prints whole. A
+  block of instructions that happens to be label-sized shows up as an extra box; delete it.
+- **whole page** prints each page as one label.
+- **Skipped pages.** Pages with no label found are left out when other pages have labels (instruction pages in a
+  multi-page PDF). The preview shows them as not printing, with **include** to print one anyway. If no page has a
+  label, they all print whole.
+- In the preview you can move, resize, add and remove boxes, or reset a page. Edits apply to that file only.
+- **Shrink warnings.** Labels print at true size or smaller. When one has to shrink to fit, the page says so: below
+  95% it warns that barcodes may not scan, and below 87% the warning is stronger. Nothing is blocked.
+- **Carrier bitmaps print unscaled.** When a label is a black/white bitmap at about the printer's resolution (UPS
+  labels usually are), its own pixels are printed 1:1. This only happens after checking them against a render of
+  the page, both over the whole box and locally, so a stamp, a logo or text drawn over or beside the image falls
+  back to rendering.
+- **UPS doc tabs.** Some UPS return labels have a strip after the label (up to 1.2 in) carrying the retailer's own
+  barcode. It doesn't fit 4x6 at full size, so the preview asks: leave it off (the default), include it (all
+  scaled to fit), or print it as a separate label.
+- **Known limit.** A label-sized block of instructions can't be told from a label, and appears as an extra box.
 
 ## Feeding and calibrating
 
