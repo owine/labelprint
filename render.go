@@ -261,15 +261,10 @@ func (d *pdfDoc) renderLabel(ctx context.Context, page int, b box, cv canvas) (g
 	if !ok { // a blank box: nothing to fit
 		return fitCanvas(g, cv), 1, nil
 	}
-	iw, ih := float64(ink.Dx()), float64(ink.Dy())
-	if iw != ih && (iw > ih) != cv.landscape() {
-		iw, ih = ih, iw // as fitCanvas will turn it
-	}
-	if iw <= float64(cv.W) && ih <= float64(cv.H) {
+	if scale = inkFit(ink, cv); scale == 1 {
 		// Centring the ink rather than the box: centre adds the white.
 		return fitCanvas(subGray(g, ink), cv), 1, nil
 	}
-	scale = min(float64(cv.W)/iw, float64(cv.H)/ih)
 	if g, err = d.renderBoxAt(ctx, page, b, dpi*scale, dpi*scale, false); err != nil {
 		return nil, 0, err
 	}
@@ -278,6 +273,42 @@ func (d *pdfDoc) renderLabel(ctx context.Context, page int, b box, cv canvas) (g
 		g = subGray(g, ink)
 	}
 	return fitCanvas(g, cv), scale, nil
+}
+
+// inkFit is what path B scales ink of this size (at the printer's
+// resolution) by: 1 when it fits the canvas as fitCanvas will turn it, else
+// the largest scale that fits.
+func inkFit(ink image.Rectangle, cv canvas) float64 {
+	iw, ih := float64(ink.Dx()), float64(ink.Dy())
+	if iw != ih && (iw > ih) != cv.landscape() {
+		iw, ih = ih, iw // as fitCanvas will turn it
+	}
+	if iw <= float64(cv.W) && ih <= float64(cv.H) {
+		return 1
+	}
+	return min(float64(cv.W)/iw, float64(cv.H)/ih)
+}
+
+// labelScale is the scale label gives b, without making the label: 1 when
+// path A applies, else path B's first render measured as renderLabel
+// measures it. The page shows it on "include" before the tab is included.
+func (d *pdfDoc) labelScale(ctx context.Context, page int, b box, cv canvas) (float64, error) {
+	if !cv.known() {
+		return 1, nil
+	}
+	if g, _, _ := d.native(ctx, page, b, cv); g != nil {
+		return 1, nil
+	}
+	dpi := float64(d.r.dpi)
+	g, err := d.renderBoxAt(ctx, page, b, dpi, dpi, false)
+	if err != nil {
+		return 0, err
+	}
+	ink, ok := inkBounds(threshold(g, 128), g.Rect, 128)
+	if !ok {
+		return 1, nil
+	}
+	return inkFit(ink, cv), nil
 }
 
 // fitCanvas turns a label to the canvas's orientation and centres it on a

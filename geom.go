@@ -20,8 +20,22 @@ type box struct{ X, Y, W, H float64 }
 // MarshalJSON writes [x, y, w, h], to 4 decimals (1/10000 of an 11 in page
 // is about a thousandth of an inch).
 func (b box) MarshalJSON() ([]byte, error) {
+	r := b.round4()
+	return json.Marshal([4]float64{r.X, r.Y, r.W, r.H})
+}
+
+// round4 is b to the 4 decimals it's sent with, so the server can work out a
+// box the page will build from the boxes it was sent.
+func (b box) round4() box {
 	r := func(v float64) float64 { return math.Round(v*1e4) / 1e4 }
-	return json.Marshal([4]float64{r(b.X), r(b.Y), r(b.W), r(b.H)})
+	return box{r(b.X), r(b.Y), r(b.W), r(b.H)}
+}
+
+// union is the smallest box holding b and o, worked out as the page's
+// unionBox does it (web/app.js), so a box sent back from it is the same box.
+func (b box) union(o box) box {
+	x, y := min(b.X, o.X), min(b.Y, o.Y)
+	return box{x, y, max(b.X+b.W, o.X+o.W) - x, max(b.Y+b.H, o.Y+o.H) - y}
 }
 
 // pixels is b on a page rendered w×h pixels, rounded outwards.

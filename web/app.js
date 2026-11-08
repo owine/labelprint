@@ -20,6 +20,7 @@ const state = {
   maxCopies: 100,
   layout: 'auto',      // label area for pdfs: auto | page
   pdf: { pages: new Map(), media: null, labelsElsewhere: 0, meta: null },
+  previewError: null,  // a field the last preview refused (pages, crops, layout): print waits for a good one
 };
 
 // ---------------------------------------------------------------- api
@@ -141,6 +142,7 @@ function absorbPdf(r) {
   for (const p of r.pages || []) {
     const fresh = (p.boxes || []).map((a, i) => ({
       ...arrBox(a), autoIndex: i, tab: p.tabs?.[i] ? arrBox(p.tabs[i]) : null, choice: 'off',
+      tabScale: p.tabScales?.[i] || null, // the server's scale for "include"
     }));
     const prev = old.get(p.page);
     const edited = !!prev?.edited;
@@ -174,20 +176,28 @@ function emptyPages() {
   return [...state.pdf.pages.values()].filter((pg) => pg.edited && !pg.boxes.length);
 }
 
+// Whether pg is the page on screen. Changing the page range (or size, or
+// layout) drops the pages before the reply that replaces them lands, so until
+// then the boxes on screen belong to no page and edits to them are ignored.
+const live = (pg) => state.pdf.pages.get(pg.page) === pg;
+
 // An edit to a page: draw it, recount, and re-preview with its crops.
 // Until the new reply lands the page's label images are the old boxes', so
 // they're shown dimmed and captioned as updating (absorbPdf makes pages anew).
+// A page left with no boxes isn't sent, so there's nothing to re-preview.
 function markEdited(pg) {
   pg.edited = true;
   pg.stale = true;
   renderPdf();
   updateSummary();
-  schedulePreview();
+  if (pg.boxes.length) schedulePreview();
 }
 
-// A moved or resized box no longer matches its detected doc tab.
+// A moved or resized box no longer matches its detected doc tab: its choice
+// goes, and the tab stays outlined (left off) until the page is reset.
 function boxChanged(pg, b) {
   if (b.tab) {
+    b.oldTab = b.tab;
     b.tab = null;
     b.choice = 'off';
   }
@@ -197,6 +207,7 @@ function boxChanged(pg, b) {
 // Focus moves to the box that took the removed one's place, or to "add label"
 // when none is left, so the keyboard isn't dropped back at the top.
 function removeBox(pg, b) {
+  if (!live(pg)) return;
   const i = pg.boxes.indexOf(b);
   pg.boxes = pg.boxes.filter((x) => x !== b);
   markEdited(pg);
@@ -208,6 +219,7 @@ function removeBox(pg, b) {
 // On a skipped page the whole-page box wasn't printing, so the new box
 // replaces it rather than joining it.
 function addBox(pg) {
+  if (!live(pg)) return;
   const m = state.pdf.media;
   let w = 0.5, h = 0.5;
   if (m) {
@@ -227,13 +239,14 @@ function addBox(pg) {
 // it right after as its own label. It belongs to the box object, so other
 // boxes keep theirs when a tab box is inserted.
 function setChoice(pg, b, choice) {
-  if (b.choice === choice) return;
+  if (b.choice === choice || !live(pg)) return;
   b.choice = choice;
   markEdited(pg);
 }
 
 // Drop a page's edits and go back to what detection found.
 function resetPage(pg) {
+  if (!live(pg)) return;
   pg.edited = false;
   pg.stale = true;
   pg.boxes = cloneBoxes(pg.autoBoxes);
@@ -302,6 +315,7 @@ function chooseFile(file) {
   state.objectURL = null;
   state.file = file;
   state.kind = null;
+  state.previewError = null;
   resetPdf();
   state.layout = 'auto';
   document.querySelector('input[name="layout"][value="auto"]').checked = true;
@@ -348,6 +362,13 @@ async function preview() {
     if (seq !== state.previewSeq) return;
     box.classList.remove('loading');
     const field = e.body?.field;
+    if (field) state.previewError = e.message;
+    // The range, size or layout changed, so the pages on screen are gone from
+    // state: take them away rather than leave boxes that edit nothing.
+    if (field && state.kind === 'pdf' && !state.pdf.pages.size) {
+      $('preview-grid').replaceChildren();
+      $('preview-note').textContent = '';
+    }
     if (field === 'pages') {
       // a bad page range: keep the file, flag the field
       $('pages').setAttribute('aria-invalid', 'true');
@@ -372,6 +393,7 @@ async function preview() {
 }
 
 function showPreview(r) {
+  state.previewError = null;
   $('preview').classList.remove('loading');
   $('pages-hint').textContent = 'e.g. 1-3, 5';
   state.kind = r.kind;
@@ -458,7 +480,7 @@ function pageFigure(pg) {
   stage.style.aspectRatio = `${pg.widthIn} / ${pg.heightIn}`;
   const nums = labelNumbers(pg);
   pg.boxes.forEach((b, i) => {
-    if (b.tab) stage.append(tabOutline(pg, b, i, nums[i]));
+    if (b.tab || b.oldTab) stage.append(tabOutline(pg, b, i, nums[i]));
     const node = boxEl(pg, b, i, nums[i]);
     if (skipped) node.classList.add('skipped');
     stage.append(node);
@@ -468,7 +490,7 @@ function pageFigure(pg) {
     const include = el('button', { type: 'button', className: 'btn btn-ghost btn-sm', textContent: 'include' });
     include.setAttribute('aria-label', `include page ${pg.page}: print it as a label`);
     include.dataset.tool = 'include';
-    include.addEventListener('click', () => { pg.edited = true; markEdited(pg); focusTool(pg, 'reset'); });
+    include.addEventListener('click', () => { if (!live(pg)) return; pg.edited = true; markEdited(pg); focusTool(pg, 'reset'); });
     tools.append(include);
   }
   const add = el('button', { type: 'button', className: 'btn btn-ghost btn-sm', textContent: 'add label' });
@@ -557,7 +579,7 @@ let dragging = false;
 let heldPreview = null;
 
 function startDrag(e, pg, b, node, corner) {
-  if (e.button !== 0 || dragging) return;
+  if (e.button !== 0 || dragging || !live(pg)) return;
   e.preventDefault();
   node.focus();
   const stage = node.parentElement.getBoundingClientRect();
@@ -611,7 +633,7 @@ function startDrag(e, pg, b, node, corner) {
 }
 
 function keyBox(e, pg, b, node) {
-  if (e.target !== node) return; // keys on the × are the button's
+  if (e.target !== node || !live(pg)) return; // keys on the × are the button's
   if (e.key === 'Delete' || e.key === 'Backspace') {
     e.preventDefault();
     if (!(pg.skipped && !pg.edited)) removeBox(pg, b);
@@ -635,10 +657,10 @@ function keyBox(e, pg, b, node) {
 
 // A detected doc tab: dashed while left off, solid once it prints. Printed
 // separately it is a label of its own, so it gets that label's number and an
-// × that leaves it off again.
+// × that leaves it off again. A tab whose box was moved (oldTab) stays dashed.
 function tabOutline(pg, b, i, num) {
   const node = el('div', { className: 'crop-tab' + (b.choice === 'off' ? '' : ' on'), title: 'doc tab' });
-  place(node, b.tab);
+  place(node, b.tab || b.oldTab);
   if (separate(b)) {
     // a tab is often a narrow strip: stack the number and × along it
     if (b.tab.h * pg.heightIn > b.tab.w * pg.widthIn) node.classList.add('tall');
@@ -664,7 +686,10 @@ function scaleNote(scale, advice = '; check the label box or the label size') {
 }
 
 // What "include" would scale the label and its tab to, together: rendered to
-// fit the label size, never enlarged (as the server does it).
+// fit the label size, never enlarged. The preview sends the server's own
+// figure (tabScale); this is for a label past the preview's cap. It fits the
+// boxes, padding and all, where the server fits their ink, so it comes out a
+// little low: shown as "about", it errs toward the stronger warning.
 function includeScale(pg, b) {
   const m = state.pdf.media;
   if (!m) return 1;
@@ -683,9 +708,10 @@ function tabChoice(pg, b, num, li) {
   const id = `tab-${pg.page}-${b.autoIndex}`;
   const seg = el('div', { className: 'seg seg-sm', role: 'group' });
   seg.setAttribute('aria-label', `doc tab of label ${num}`);
-  // once included and rendered, the server's own figure
-  const scale = b.choice === 'include' && li ? li.scale : includeScale(pg, b);
-  const pct = Math.round(scale * 100);
+  // the server's figure: once included and rendered, the label's own
+  const exact = b.choice === 'include' && li ? li.scale : b.tabScale;
+  const scale = exact || includeScale(pg, b);
+  const pct = `${exact ? '' : 'about '}${Math.round(scale * 100)}%`;
   const full = !separate(b) && flatBoxes(pg).length + 1 > MAX_BOXES;
   const hints = [];
   const hint = (key, text, warn) => {
@@ -693,7 +719,7 @@ function tabChoice(pg, b, num, li) {
     hints.push(p);
     return p.id;
   };
-  for (const [v, text] of [['off', 'leave off'], ['include', state.pdf.media ? `include · scaled to ${pct}%` : 'include'], ['separate', 'print separately']]) {
+  for (const [v, text] of [['off', 'leave off'], ['include', state.pdf.media ? `include · scaled to ${pct}` : 'include'], ['separate', 'print separately']]) {
     const btn = el('button', { type: 'button', textContent: text });
     btn.dataset.tool = `${id}-${v}`;
     btn.setAttribute('aria-pressed', String(b.choice === v));
@@ -760,16 +786,17 @@ function zplSource(open) {
 
 function updateSummary() {
   const btn = $('print');
-  const copies = parseInt($('copies').value, 10);
+  const copies = wholeCopies($('copies').value);
   const copiesOK = copies >= 1 && copies <= state.maxCopies;
   if (copiesOK) $('copies').removeAttribute('aria-invalid');
   else $('copies').setAttribute('aria-invalid', 'true');
   const empty = state.kind === 'pdf' ? emptyPages() : [];
-  btn.disabled = !state.kind || !copiesOK || empty.length > 0;
+  btn.disabled = !state.kind || !copiesOK || empty.length > 0 || !!state.previewError;
   const sum = $('summary');
   if (!state.file) { sum.textContent = 'choose a file to start'; return; }
   if (!state.kind) { sum.textContent = ''; return; }
-  if (!copiesOK) { sum.textContent = `copies: 1 to ${state.maxCopies}`; return; }
+  if (state.previewError) { sum.textContent = state.previewError; return; }
+  if (!copiesOK) { sum.textContent = `copies: a whole number, 1 to ${state.maxCopies}`; return; }
   let units = 1;
   if (state.kind === 'pdf') units = pdfLabelCount();
   const total = units * copies;
@@ -788,7 +815,12 @@ function schedulePreview() {
   clearTimeout(previewTimer);
   previewTimer = setTimeout(preview, 450);
 }
-$('pages').addEventListener('input', () => { clearEdits(); schedulePreview(); });
+// the boxes on screen stop being editable at once (see live): dim them until the reply
+$('pages').addEventListener('input', () => {
+  clearEdits();
+  if (state.kind === 'pdf') $('preview').classList.add('loading');
+  schedulePreview();
+});
 $('media').addEventListener('change', () => {
   if (state.kind === 'pdf') clearEdits();
   if (state.kind === 'zpl' || state.kind === 'pdf') preview();

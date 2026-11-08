@@ -280,13 +280,17 @@ type previewPage struct {
 	Page  int    `json:"page"`
 	Image string `json:"image"` // data: URL
 	// pdf only
-	WidthIn     float64        `json:"widthIn,omitempty"` // the page as displayed
-	HeightIn    float64        `json:"heightIn,omitempty"`
-	Auto        bool           `json:"auto,omitempty"`
-	Fallback    bool           `json:"fallback,omitempty"`
-	Skipped     bool           `json:"skipped,omitempty"` // no label here while other pages have one: not printing
-	Boxes       []box          `json:"boxes,omitempty"`
-	Tabs        []*box         `json:"tabs,omitempty"`
+	WidthIn  float64 `json:"widthIn,omitempty"` // the page as displayed
+	HeightIn float64 `json:"heightIn,omitempty"`
+	Auto     bool    `json:"auto,omitempty"`
+	Fallback bool    `json:"fallback,omitempty"`
+	Skipped  bool    `json:"skipped,omitempty"` // no label here while other pages have one: not printing
+	Boxes    []box   `json:"boxes,omitempty"`
+	Tabs     []*box  `json:"tabs,omitempty"`
+	// parallel to Boxes: the scale its label would print at with its doc tab
+	// included (0: no tab, or not previewed), so "include" shows the figure
+	// it will get before it's chosen
+	TabScales   []float64      `json:"tabScales,omitempty"`
 	LabelImages []previewLabel `json:"labelImages,omitempty"`
 }
 
@@ -450,7 +454,7 @@ func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewRespon
 		pw, ph := doc.geom(pl.Page).inches()
 		pp := previewPage{Page: pl.Page, Image: dataURL(images[pl.Page]), WidthIn: round2(pw), HeightIn: round2(ph),
 			Auto: pl.Auto, Fallback: pl.Fallback, Skipped: pl.Skip, Boxes: pl.Boxes, Tabs: pl.Tabs}
-		for _, b := range pl.Boxes {
+		for i, b := range pl.Boxes {
 			if budget == 0 || pl.Skip { // a skipped page's box isn't printing, so it gets no image
 				break
 			}
@@ -461,6 +465,18 @@ func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewRespon
 			pp.LabelImages = append(pp.LabelImages, previewLabel{Image: dataURL(l.PNG), Method: l.Method,
 				PPI: int(math.Round(l.PPI)), Scale: round2(l.Scale)})
 			budget--
+			if i < len(pl.Tabs) && pl.Tabs[i] != nil && o.canvas.known() {
+				if pp.TabScales == nil {
+					pp.TabScales = make([]float64, len(pl.Boxes))
+				}
+				// the box "include" sends: both as sent, joined, rounded
+				inc := b.round4().union(pl.Tabs[i].round4()).round4()
+				sc, err := doc.labelScale(ctx, pl.Page, inc, o.canvas)
+				if err != nil {
+					return &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
+				}
+				pp.TabScales[i] = round2(sc)
+			}
 		}
 		resp.Pages = append(resp.Pages, pp)
 	}

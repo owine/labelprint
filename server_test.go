@@ -505,6 +505,54 @@ func TestPreviewLabelScale(t *testing.T) {
 	}
 }
 
+// "include" on a doc tab shows the scale before it's chosen: the figure the
+// preview gives once the page sends the joined box as its crops.
+func TestPreviewTabScale(t *testing.T) {
+	requirePoppler(t)
+	_, h := newTestServer(t)
+	pdf := fixReturn(1340, 206, 196)
+	rec, out := post(t, h, "/api/preview", "x.pdf", pdf, nil)
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	p := out["pages"].([]any)[0].(map[string]any)
+	ts, ok := p["tabScales"].([]any)
+	if !ok || len(ts) != 1 {
+		t.Fatalf("tabScales = %v", p["tabScales"])
+	}
+	want := ts[0].(float64)
+	if want <= 0 || want >= 1 {
+		t.Fatalf("include scale %v, want a shrink", want)
+	}
+	if s := p["labelImages"].([]any)[0].(map[string]any)["scale"]; s != 1.0 {
+		t.Errorf("the label on its own is scaled to %v, want 1", s)
+	}
+	// as the page builds it: unionBox of the two boxes as sent, to 4 decimals
+	f := func(v any) box {
+		a := v.([]any)
+		return box{a[0].(float64), a[1].(float64), a[2].(float64), a[3].(float64)}
+	}
+	u := f(p["boxes"].([]any)[0]).union(f(p["tabs"].([]any)[0])).round4()
+	crops := fmt.Sprintf(`{"1": [[%v, %v, %v, %v]]}`, u.X, u.Y, u.W, u.H)
+	rec, out = post(t, h, "/api/preview", "x.pdf", pdf, map[string]string{"crops": crops})
+	if rec.Code != 200 {
+		t.Fatalf("include: status %d: %s", rec.Code, rec.Body)
+	}
+	p = out["pages"].([]any)[0].(map[string]any)
+	if got := p["labelImages"].([]any)[0].(map[string]any)["scale"]; got != want {
+		t.Errorf("included label scaled to %v, but include said %v", got, want)
+	}
+	if p["tabScales"] != nil {
+		t.Errorf("a page with crops has no detected tabs: %v", p["tabScales"])
+	}
+
+	// no doc tab, no tabScales
+	_, out = post(t, h, "/api/preview", "x.pdf", makeLabelPDF(1), nil)
+	if v := out["pages"].([]any)[0].(map[string]any)["tabScales"]; v != nil {
+		t.Errorf("tabScales without a tab: %v", v)
+	}
+}
+
 func TestPreviewAndPrintSkipPagesWithNoLabel(t *testing.T) {
 	requirePoppler(t)
 	fake, h := newTestServer(t)
