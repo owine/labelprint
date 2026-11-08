@@ -69,9 +69,14 @@ files (`.gitignore` blocks `*.zpl` outside `testdata/`). The page loads nothing 
 ## The iOS Shortcut
 
 `web/labelprint.shortcut` is a signed build of `shortcut/labelprint.shortcut.xml` (the XML lives outside `web/` so it
-isn't served). Its first action is a Text holding `https://labelprint.example`, which an import question replaces with
-the user's address; the rest POSTs Shortcut Input to `<address>/share` as form field `file` and opens
-`<address>` + the reply's `url`. Edit the XML, never the signed file, and keep real addresses out of it. Rebuild:
+isn't served). Actions 0 and 1 are Texts holding `https://labelprint.example` and `paste-your-share-key`, which two
+import questions (`ActionIndex` 0 and 1, `ParameterKey` `WFTextActionText`) replace with the user's address and share
+key. Import questions can only fill plain action parameters, hence the Texts. The rest POSTs Shortcut Input to
+`<address>/share` as form field `file`, with headers `Accept: application/json` and `X-Labelprint-Share: <key>`, and
+opens `<address>` + the reply's `url`. If you insert or reorder actions, fix the questions' `ActionIndex`. labelprint
+never checks the share key: the auth proxy matches it (README, "Letting the shortcut past your auth proxy"), so don't
+add an app-side check. A key left as the placeholder is sent harmlessly. Edit the XML, never the signed file, and keep
+real addresses and keys out of it. Rebuild:
 
 ```sh
 plutil -lint shortcut/labelprint.shortcut.xml

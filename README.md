@@ -90,21 +90,23 @@ page, the file is lost, so open the app once to sign in, then share again.
 
 1. Open labelprint in Safari on the iPhone and tap **add the share shortcut to an iPhone** at the bottom of the page.
    Safari downloads `labelprint.shortcut`; open it from the downloads list.
-2. Choose **Add Shortcut** and answer the one question with your labelprint's address, e.g.
-   `https://labels.example.com` (no trailing slash).
+2. Choose **Add Shortcut** and answer its two questions: your labelprint's address, e.g. `https://labels.example.com`
+   (no trailing slash), and your share key (see below). If your proxy doesn't need a key, leave the second answer
+   as it is.
 3. Share a label (PDF, image or `.zpl`) from Mail or Files and pick **labelprint**. Safari opens the preview.
 
-The shortcut POSTs the file to `/share` with `Accept: application/json`. `/share` then answers
-`{"url": "/?share=<token>"}` instead of redirecting, and errors come back as `{"error": "…"}`, which the shortcut
-shows. Your auth proxy has to let the shortcut through (see below). If it wants a header or token, edit the
-shortcut and add it to **Get Contents of URL**.
+The shortcut POSTs the file to `/share` with the headers `Accept: application/json` and
+`X-Labelprint-Share: <your share key>`. `/share` then answers `{"url": "/?share=<token>"}` instead of redirecting,
+and errors come back as `{"error": "…"}`, which the shortcut shows. To change the key later, edit the shortcut: it's
+the second **Text** action.
 
 <details>
 <summary>Building the shortcut by hand</summary>
 
 1. Create a shortcut. In its details, turn on **Show in Share Sheet** and accept **PDFs**, **Images** and **Files**.
 2. **Get Contents of URL**: `https://<your labelprint>/share`, method **POST**, request body **Form** with one
-   field set to **Shortcut Input**. Add a header `Accept: application/json`, plus whatever your auth proxy needs.
+   field set to **Shortcut Input**. Add the headers `Accept: application/json` and `X-Labelprint-Share` with your
+   share key.
 3. **Get Dictionary Value** `url` from **Contents of URL**. It's a path like `/?share=…`.
 4. **Text**: `https://<your labelprint>` followed by **Dictionary Value**, then **Open URLs** with that text.
 
@@ -113,12 +115,42 @@ dictionary key must be the literal text `url`, typed in, not a variable.
 
 </details>
 
-> [!NOTE]
-> A Shortcut doesn't carry Safari's cookies, so your auth proxy needs a rule for `POST /share` before the shortcut
-> works. How depends on the proxy. Options include a header or token the proxy accepts for this one path, or a rule
-> that passes `POST /share` from your LAN or VPN without a login. Anyone the proxy lets through can stage files. They
-> can't print, and they can't read a share without its link, but they can push your pending share out early by
-> filling the 8 slots. Opening the link in Safari still goes through your normal login.
+### Letting the shortcut past your auth proxy
+
+A Shortcut doesn't carry Safari's cookies, so your auth proxy has to let `POST /share` through without a login. The
+share key keeps that opening narrow: the proxy skips the login only for `POST /share` requests that carry the key in
+`X-Labelprint-Share`. labelprint doesn't check the header itself; the proxy is the gate.
+
+1. Generate a key with `openssl rand -base64 32`.
+2. Put it in the stack's `.env` as `LABELPRINT_SHARE_KEY=<key>`.
+3. Type the same key into the shortcut's second question when you add it.
+
+With Traefik v3, keep your normal router and add a second one without the auth middleware. Its priority makes Traefik
+try it first:
+
+```yaml
+labels:
+  traefik.http.routers.labelprint.rule: "Host(`labels.example.com`)"
+  traefik.http.routers.labelprint.middlewares: "authelia@file"
+  traefik.http.routers.labelprint-share.rule: >-
+    Host(`labels.example.com`) && Method(`POST`) && Path(`/share`)
+    && Header(`X-Labelprint-Share`, `${LABELPRINT_SHARE_KEY:?}`)
+  traefik.http.routers.labelprint-share.priority: "100"
+  traefik.http.routers.labelprint-share.service: "labelprint"
+  traefik.http.services.labelprint.loadbalancer.server.port: "8080"
+```
+
+Compose fills in `${LABELPRINT_SHARE_KEY:?}` from `.env`, and the `:?` stops it starting with an empty key, which
+would let through any request that sends the header empty. Traefik v2 spells the matcher `Headers`. A request with a
+wrong or missing key falls through to the normal router and its login, and the shortcut shows the error.
+
+Other proxies work the same way: a rule that passes `POST /share` without a login only when `X-Labelprint-Share`
+matches the key. If you use Authelia, put that rule in the proxy in front of it. Authelia's own access-control rules
+can't match request headers. A rule that passes `POST /share` from your LAN or VPN is another option.
+
+Either way, a client that gets past the rule can only stage files. It can't open a share without its link, can't
+print, and can't read anything back. At worst it can churn the store (8 shares, 80 MB) and push your pending share out
+early. Opening the link in Safari still goes through your normal login.
 
 ## Configuration
 
