@@ -84,6 +84,20 @@ jobs:
       - name: Test
         run: go test -race -count=1 ./...
 
+      # zebrash and the libraries under it are fed untrusted uploads; a minute
+      # of fuzzing checks a dependency bump or a zpl.go change hasn't let a
+      # panic or a hang past render. A crasher lands in testdata/fuzz/.
+      - name: Fuzz the zpl preview
+        run: go test -run '^$' -fuzz '^FuzzZPLPreview$' -fuzztime 60s .
+
+      - name: Upload fuzz crashers
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: fuzz-crashers
+          path: testdata/fuzz/FuzzZPLPreview/
+          if-no-files-found: ignore
+
   docker-build:
     name: docker build (${{ matrix.platform }})
     # Builds PR code, so it holds no token that can write packages; pushing is

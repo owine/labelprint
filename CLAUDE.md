@@ -64,6 +64,7 @@ files (`.gitignore` blocks `*.zpl` outside `testdata/`). The page loads nothing 
 ```sh
 go test -race ./...                                  # PDF tests skip without poppler
 UPDATE_FIXTURES=1 go test -run Fixture               # after changing makeLabelPDF
+go test -run '^$' -fuzz '^FuzzZPLPreview$' -fuzztime 5m .  # crashers land in testdata/fuzz/
 docker buildx build --platform linux/arm64 -t labelprint:test --load .
 docker run --rm -p 8080:8080 --read-only --cap-drop ALL --tmpfs /tmp labelprint:test
 ```
