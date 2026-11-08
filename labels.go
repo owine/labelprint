@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"image"
+	"slices"
 )
 
 // pagePlan is how one page becomes labels.
@@ -12,6 +13,7 @@ type pagePlan struct {
 	Fallback bool   // detection found nothing label-sized
 	Boxes    []box  // in print order
 	Tabs     []*box // auto only, parallel to Boxes; nil when no box has a doc tab
+	Skip     bool   // auto fallback page while another selected page has labels: left out unless the user includes it
 }
 
 // labelOpts is how boxes are chosen and what they're drawn onto.
@@ -58,6 +60,13 @@ func (d *pdfDoc) plan(ctx context.Context, pages []int, o labelOpts) []pagePlan 
 			continue
 		}
 		out = append(out, d.detectPage(ctx, p, renders[p], o))
+	}
+	// A page with no label (instructions, say) beside pages with labels is
+	// left out; when nothing in the selection has one, it prints whole.
+	if slices.ContainsFunc(out, func(p pagePlan) bool { return p.Auto && !p.Fallback }) {
+		for i := range out {
+			out[i].Skip = out[i].Auto && out[i].Fallback
+		}
 	}
 	return out
 }

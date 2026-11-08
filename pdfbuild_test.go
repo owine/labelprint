@@ -478,3 +478,15 @@ func TestBuilderFrames(t *testing.T) {
 		})
 	}
 }
+
+// a label page followed by an instructions page with no label on it
+func fixLabelThenText() []byte {
+	var b pdfBuilder
+	p := b.page(letter, 0)
+	p.vectorLabel(2.25, 2.5, 4, 6)
+	p = b.page(letter, 0)
+	for _, y := range []float64{1, 4.5, 8} {
+		p.paragraph(1, y, 5, 70)
+	}
+	return b.bytes()
+}

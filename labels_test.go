@@ -240,3 +240,27 @@ func TestLabelMethods(t *testing.T) {
 		t.Fatalf("vector label: %v %s", err, l.Method)
 	}
 }
+
+func TestPlanSkipsPagesWithoutLabels(t *testing.T) {
+	ctx := context.Background()
+	doc := openTest(t, fixLabelThenText())
+	pl := doc.plan(ctx, []int{1, 2}, opts46)
+	if pl[0].Skip || !pl[1].Fallback || !pl[1].Skip {
+		t.Fatalf("p1 skip=%v; p2 fallback=%v skip=%v; want p2 skipped", pl[0].Skip, pl[1].Fallback, pl[1].Skip)
+	}
+	if pl := doc.plan(ctx, []int{2}, opts46); pl[0].Skip {
+		t.Error("with no label anywhere in the selection, the fallback page still prints")
+	}
+	o := opts46
+	o.layout = "page"
+	for _, p := range doc.plan(ctx, []int{1, 2}, o) {
+		if p.Skip {
+			t.Error("layout=page never skips")
+		}
+	}
+	o = opts46
+	o.crops = map[int][]box{2: {{0, 0, 1, 1}}}
+	if pl := doc.plan(ctx, []int{1, 2}, o); pl[1].Skip {
+		t.Error("a page with crops is never skipped")
+	}
+}
