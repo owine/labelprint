@@ -236,6 +236,9 @@ func TestZPLFitWarning(t *testing.T) {
 	}{
 		{"fits", "^XA^PW812^LL1218^XZ", size4x6, ""},
 		{"within the margin", "^XA^PW828^LL1240^XZ", size4x6, ""},
+		{"head-width ^PW on 4 in labels", "^XA^PW832^LL1218^XZ", size4x6, ""},
+		{"head-width ^PW on 2 in labels", "^XA^PW832^XZ", size2x1, "this zpl is 4.1 in wide at 203 dpi, wider than the 2 × 1 in labels selected"},
+		{"just past the head-width slack", "^XA^PW850^XZ", size4x6, "this zpl is 4.19 in wide at 203 dpi, wider than the 4 × 6 in labels selected"},
 		{"nothing to compare", "^XA^FO10,10^GB50,50,50^FS^XZ", size4x6, ""},
 		{"media unknown", "^XA^PW1218^LL1800^XZ", labelSize{}, ""},
 		{"too long", "^XA^PW812^LL1624^XZ", size4x6, "this zpl is 4 × 8 in at 203 dpi, bigger than the 4 × 6 in labels selected: it will run onto the next label"},

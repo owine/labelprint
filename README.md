@@ -59,10 +59,11 @@ The preview is drawn in the container too, for up to 12 pages or labels:
   the printer's; the printer always gets the original ZPL. The canvas uses the label's own `^PW`/`^LL` when set, and
   the size dropdown otherwise. Labels drawn with `^POI` (printed rotated 180°) are shown upright. If zebrash can't
   draw a label, the page says why and shows the source; printing isn't affected.
-- **ZPL that doesn't fit** gets a warning above the preview: when the largest `^PW` or `^LL` in the file is more than
-  2% bigger than the label size in the dropdown at `RENDER_DPI` (a 4×8 or 4×6.75 doc-tab label on 4×6 stock), or the
-  `^PW` looks like a 300 dpi label on a 203 dpi printer. The ZPL is still sent unchanged and print stays enabled;
-  ZPL without `^PW`/`^LL` isn't checked.
+- **ZPL that doesn't fit** gets a warning above the preview: when the largest `^LL` in the file is more than 2%
+  longer than the label size in the dropdown at `RENDER_DPI` (a 4×8 or 4×6.75 doc-tab label on 4×6 stock), the
+  largest `^PW` is wider by more than 2% or 0.12 in, whichever is larger (so a head-width `^PW832` on 4 in labels
+  passes), or the `^PW` looks like a 300 dpi label on a 203 dpi printer. The ZPL is still sent unchanged and print
+  stays enabled; ZPL without `^PW`/`^LL` isn't checked.
 - **PDFs** show each page at 96 dpi with its label boxes drawn over it, and the labels cut from those boxes exactly as
   they'll be sent: black and white at `RENDER_DPI`, turned and fitted to the label size.
 - **PNG and JPEG** previews are drawn by your browser.

@@ -99,11 +99,20 @@ func largestNumber(re *regexp.Regexp, data []byte) (int, bool) {
 	return best, best > 0
 }
 
-// fitMargin is how far ^PW/^LL may exceed the selected labels before the
-// preview warns: 2%, which absorbs the rounding in "4 in = 812 or 813 dots"
-// and stock that's nominally 6 in, yet is far below the 12% of a 4×6.75 doc
-// tab label or the 33% of a 4×8 one.
-const fitMargin = 0.02
+// fitMargin is how far ^LL may exceed the selected labels before the preview
+// warns: 2%, which absorbs the rounding in "6 in = 1218 or 1219 dots" and
+// stock that's nominally 6 in, yet is far below the 12% of a 4×6.75 doc tab
+// label or the 33% of a 4×8 one. Running across the gap is the real failure.
+//
+// ^PW gets the larger of that and fitWidthSlack: some generators set ^PW to
+// the head's full width (832 dots, 4.1 in, on a 4 in 203 dpi head) rather
+// than the label's, and that prints fine because the content stays on the
+// label. 0.12 in lets ^PW832 pass on 4 in labels (up to ~836 dots) but not on
+// 2 in ones.
+const (
+	fitMargin     = 0.02
+	fitWidthSlack = 0.12 // inches
+)
 
 // fitWarning says when the zpl's own ^PW/^LL are bigger than the selected
 // labels, so it would be cut off at the side or print across the gap onto
@@ -118,7 +127,7 @@ func (z *zplRenderer) fitWarning(data []byte, media labelSize) string {
 	pw, hasW := largestNumber(zplPrintWidth, data)
 	ll, hasL := largestNumber(zplLabelLength, data)
 	w, h := float64(pw)/dpi, float64(ll)/dpi
-	wide := hasW && w > mediaW*(1+fitMargin)
+	wide := hasW && w > mediaW+max(mediaW*fitMargin, fitWidthSlack)
 	long := hasL && h > mediaH*(1+fitMargin)
 	if !wide && !long {
 		return ""
