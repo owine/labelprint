@@ -352,7 +352,7 @@ function chooseFile(file) {
 // For ZPL the size only shapes the preview (where the zpl doesn't set ^PW/^LL
 // itself); the printer goes by the zpl, so it isn't sent with the job.
 function setMediaHint(kind) {
-  $('media-hint').textContent = kind === 'zpl' ? 'for the preview — the zpl sets the printed size' : '';
+  $('media-hint').textContent = kind === 'zpl' ? 'for the preview and the size check — the zpl sets the printed size' : '';
 }
 
 async function preview() {
@@ -418,6 +418,10 @@ function renderPreview(r) {
   if (r.kind !== 'pdf') grid.replaceChildren(); // renderPdf swaps the pages itself, keeping focus
   grid.classList.toggle('pdf-mode', r.kind === 'pdf');
   note.classList.remove('err');
+  // zpl only, and never a block: the zpl is sent unchanged whatever its size
+  const warning = $('preview-warning');
+  warning.textContent = r.fitWarning || '';
+  warning.hidden = !r.fitWarning;
   document.querySelector('.zpl-source')?.remove();
   $('preview').hidden = false;
   if (r.kind === 'pdf') {

@@ -320,6 +320,9 @@ type previewResponse struct {
 	// zpl only: why there's no picture if zebrash couldn't draw one. A failed
 	// preview never blocks printing: the printer interprets the zpl itself.
 	PreviewError string `json:"previewError,omitempty"`
+	// zpl only: its ^PW/^LL are bigger than the selected labels, or look made
+	// for 300 dpi. A warning, never a block: the zpl still prints unchanged.
+	FitWarning string `json:"fitWarning,omitempty"`
 }
 
 func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
@@ -336,6 +339,7 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			media, _ = mediaSize(s.cfg.DefaultMedia)
 		}
+		resp.FitWarning = s.zpl.fitWarning(up.Data, media) // from ^PW/^LL alone, so it holds when zebrash fails
 		p, err := s.zpl.render(r.Context(), up.Data, media, maxPreviewPages)
 		if err != nil {
 			// zebrash's drawer errors can quote field data (e.g. "can not
