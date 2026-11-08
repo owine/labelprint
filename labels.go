@@ -15,6 +15,7 @@ type pagePlan struct {
 	Boxes    []box  // in print order
 	Tabs     []*box // auto only, parallel to Boxes; nil when no box has a doc tab
 	Skip     bool   // auto fallback page while another selected page has labels: left out unless the user includes it
+	Failed   bool   // auto: detection couldn't run (its render failed or was unreadable), so this is the fallback
 }
 
 // labelOpts is how boxes are chosen and what they're drawn onto.
@@ -35,8 +36,9 @@ type labelImg struct {
 }
 
 // plan picks every page's boxes: the user's crops, the whole page, or
-// detection. A page detection can't analyse gets the whole page; only a page
-// too large to render (checkRender) fails the request.
+// detection. A page detection can't analyse gets the whole page, marked
+// Failed (print refuses it, the preview shows it); only a page too large to
+// render (checkRender) fails here.
 func (d *pdfDoc) plan(ctx context.Context, pages []int, o labelOpts) ([]pagePlan, error) {
 	var detect []int
 	for _, p := range pages {
@@ -86,14 +88,14 @@ func (d *pdfDoc) plan(ctx context.Context, pages []int, o labelOpts) ([]pagePlan
 // detectPage runs detection on a page's 50 dpi render. Embedded image
 // positions, which the doc-tab split needs, are fetched only if it asks.
 func (d *pdfDoc) detectPage(ctx context.Context, page int, png []byte, o labelOpts) pagePlan {
-	whole := pagePlan{Page: page, Auto: true, Fallback: true, Boxes: []box{{0, 0, 1, 1}}}
+	failed := pagePlan{Page: page, Auto: true, Fallback: true, Failed: true, Boxes: []box{{0, 0, 1, 1}}}
 	if png == nil {
-		return whole
+		return failed
 	}
 	img, err := decodePNGBytes(png)
 	if err != nil {
 		d.r.log.Warn("detection failed", "page", page, "reason", "unreadable render")
-		return whole
+		return failed
 	}
 	m := newMask(img)
 	det := &detector{m: m, dpi: detectDPI}

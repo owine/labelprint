@@ -83,6 +83,8 @@ page. labelprint finds the label-sized blocks on each page and prints each as it
 - **UPS doc tabs.** Some UPS return labels have a strip after the label (up to 1.2 in) carrying the retailer's own
   barcode. It doesn't fit 4x6 at full size, so the preview asks: leave it off (the default), include it (all
   scaled to fit), or print it as a separate label.
+- **Printing finds the labels again.** If that fails at print time (an overloaded host, say), nothing is sent and
+  the page says so: try again, or choose whole page. Falling back would print whole pages the preview didn't show.
 - **Known limit.** A label-sized block of instructions can't be told from a label, and appears as an extra box.
 
 ## Feeding and calibrating

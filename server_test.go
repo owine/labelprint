@@ -865,3 +865,45 @@ func TestHugePageIsA422(t *testing.T) {
 		t.Errorf("%d jobs sent", n)
 	}
 }
+
+// breakDetection makes pdftoppm fail for the 50 dpi detection render only.
+func breakDetection(t *testing.T) {
+	shimTool(t, "pdftoppm", `case " $* " in *" -r 50.0000 "*) echo "detection broke" >&2; exit 1;; esac
+exec "$REAL" "$@"`)
+}
+
+// Detection that fails at print time refuses the print: falling back would
+// print whole pages, and skip pages, differently from what the preview showed.
+func TestPrintRefusesWhenDetectionFails(t *testing.T) {
+	requirePoppler(t)
+	fake, h := newTestServer(t)
+	breakDetection(t)
+	pdf := fixLabelThenText()
+	rec, out := post(t, h, "/api/print", "x.pdf", pdf, nil)
+	want := "couldn't find the labels on page 1 this time — try again, or choose whole page"
+	if rec.Code != 422 || out["error"] != want {
+		t.Fatalf("print: %d %s, want 422 %q", rec.Code, rec.Body, want)
+	}
+	if n := len(fake.printJobs()); n != 0 {
+		t.Fatalf("%d jobs sent", n)
+	}
+	// The preview keeps falling back to the whole page.
+	rec, out = post(t, h, "/api/preview", "x.pdf", pdf, nil)
+	if rec.Code != 200 {
+		t.Fatalf("preview: %d %s", rec.Code, rec.Body)
+	}
+	for _, p := range out["pages"].([]any) {
+		if p := p.(map[string]any); p["fallback"] != true {
+			t.Errorf("preview page %v: fallback %v", p["page"], p["fallback"])
+		}
+	}
+	// Whole page and the user's own boxes don't detect.
+	for _, f := range []map[string]string{{"layout": "page"}, {"crops": `{"1": [[0,0,1,1]], "2": [[0,0,1,1]]}`}} {
+		if rec, _ := post(t, h, "/api/print", "x.pdf", pdf, f); rec.Code != 200 {
+			t.Errorf("print %v: %d %s", f, rec.Code, rec.Body)
+		}
+	}
+	if n := len(fake.printJobs()); n != 4 {
+		t.Errorf("%d jobs, want 2 + 2", n)
+	}
+}

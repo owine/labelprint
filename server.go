@@ -626,6 +626,18 @@ func (s *server) buildJobs(ctx context.Context, up *upload, copies int, media, u
 		if err != nil {
 			return nil, err
 		}
+		// The preview falls back to the whole page when detection fails; print
+		// refuses instead, since what it would send (and skip) isn't what the
+		// preview showed.
+		for _, pl := range plans {
+			if pl.Failed {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				return nil, &userError{Status: http.StatusUnprocessableEntity,
+					Msg: fmt.Sprintf("couldn't find the labels on page %d this time — try again, or choose whole page", pl.Page)}
+			}
+		}
 		var out []printRequest
 		for _, pl := range plans {
 			if pl.Skip {
