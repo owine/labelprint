@@ -171,7 +171,10 @@ func (im pdfImage) object() string {
 		}
 	}
 	var z bytes.Buffer
-	zw := zlib.NewWriter(&z)
+	zw, err := zlib.NewWriterLevel(&z, zlib.NoCompression)
+	if err != nil {
+		panic(err)
+	}
 	_, _ = zw.Write(raw)
 	_ = zw.Close()
 	return fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace %s "+
@@ -414,6 +417,8 @@ func TestBuilderFrames(t *testing.T) {
 		// bitmap label at (0.75, 1.25) of a 10.5 × 8 in crop: block 0.8–1.1, 1.3–1.6 in
 		{"rotate 270 + cropbox", fixUPS2up(true, 200), 525, 400, 47, 72, 225, 72},
 		{"rotate 270", fixUPS2up(false, 200), 550, 425, 47, 72, 225, 72},
+		// 4 × 6 in page, image turned clockwise: its top-left block lands at the displayed top-right
+		{"image turned clockwise", fixClippedTab(), 200, 300, 190, 10, 10, 10},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
