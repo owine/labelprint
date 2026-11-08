@@ -29,13 +29,26 @@ type pdfPage struct {
 type pdfImage struct {
 	w, h int
 	pix  []bool
-	kind string // "gray1" (1-bit DeviceGray, the default), "rgb" or "indexed"
+	kind string // "gray1" (1-bit DeviceGray, the default), "rgb", "indexed" or "dct"
+	dct  []byte // kind "dct": the stream as is, whatever its own header says
 }
 
 func newBitmap(w, h int) pdfImage { return pdfImage{w: w, h: h, pix: make([]bool, w*h), kind: "gray1"} }
 
 func (im pdfImage) set(x, y int)        { im.pix[y*im.w+x] = true }
 func (im pdfImage) black(x, y int) bool { return im.pix[y*im.w+x] }
+
+// gray is im as an 8-bit gray image: black 0, white 255.
+func (im pdfImage) gray() *image.Gray {
+	g := image.NewGray(image.Rect(0, 0, im.w, im.h))
+	for i, b := range im.pix {
+		if !b {
+			g.Pix[i] = 255
+		}
+	}
+	return g
+}
+
 func (im pdfImage) fill(x0, y0, x1, y1 int) {
 	for y := y0; y < y1; y++ {
 		for x := x0; x < x1; x++ {
@@ -118,6 +131,32 @@ func (p *pdfPage) image(im pdfImage, x, y, w, h float64, turns int) {
 	p.images = append(p.images, im)
 }
 
+// imageAs draws im into the displayed rectangle so that what's displayed is
+// rotate(mirror(im) if flip, turns): any of the 8 placements a PDF can make.
+func (p *pdfPage) imageAs(im pdfImage, x, y, w, h float64, flip bool, turns int) {
+	fx, fy, fw, fh := p.pt(x, y, w, h)
+	// (u, v): the image's unit square, origin bottom-left, as cm maps it.
+	// Its top-down point (u, 1−v) is displayed, top-down, at to(u, 1−v).
+	to := func(a, b float64) (float64, float64) {
+		if flip {
+			a = 1 - a
+		}
+		for range turns { // clockwise
+			a, b = 1-b, a
+		}
+		return a, b
+	}
+	at := func(u, v float64) (float64, float64) {
+		s, t := to(u, 1-v)
+		return fx + s*fw, fy + fh - t*fh
+	}
+	e, f := at(0, 0)
+	ax, ay := at(1, 0)
+	cx, cy := at(0, 1)
+	fmt.Fprintf(&p.ops, "q %g %g %g %g %g %g cm /Im%d Do Q\n", ax-e, ay-f, cx-e, cy-f, e, f, len(p.images))
+	p.images = append(p.images, im)
+}
+
 // vectorLabel draws a label in vector: a 2 pt border, a solid block in its
 // top-left corner (to catch mirrored or turned output), bars and a line of text.
 func (p *pdfPage) vectorLabel(x, y, w, h float64) {
@@ -138,6 +177,10 @@ func (p *pdfPage) paragraph(x, y float64, lines, chars int) {
 }
 
 func (im pdfImage) object() string {
+	if im.kind == "dct" {
+		return fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceGray "+
+			"/BitsPerComponent 8 /Filter /DCTDecode /Length %d >>\nstream\n%s\nendstream", im.w, im.h, len(im.dct), im.dct)
+	}
 	var raw []byte
 	cs, bpc := "/DeviceGray", 1
 	switch im.kind {

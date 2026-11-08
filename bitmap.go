@@ -83,10 +83,13 @@ func mirror(g *image.Gray) *image.Gray {
 	return out
 }
 
-// subGray copies r out of g, origin 0,0.
+// subGray copies r, which must lie within g, out of g, origin 0,0.
 func subGray(g *image.Gray, r image.Rectangle) *image.Gray {
 	out := image.NewGray(image.Rect(0, 0, r.Dx(), r.Dy()))
-	draw.Draw(out, out.Rect, g, r.Min, draw.Src)
+	for y := range r.Dy() {
+		i := g.PixOffset(r.Min.X, r.Min.Y+y)
+		copy(out.Pix[y*out.Stride:], g.Pix[i:i+r.Dx()])
+	}
 	return out
 }
 
@@ -170,7 +173,20 @@ func encodeGray(g *image.Gray) ([]byte, error) {
 
 func decodePNGBytes(data []byte) (image.Image, error) { return png.Decode(bytes.NewReader(data)) }
 
-// decodeImageFile reads a PNG or JPEG.
+// imageFileSize reads only a PNG's or JPEG's header: the size a full decode
+// would allocate.
+func imageFileSize(path string) (image.Point, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return image.Point{}, err
+	}
+	defer f.Close()
+	cfg, _, err := image.DecodeConfig(f)
+	return image.Pt(cfg.Width, cfg.Height), err
+}
+
+// decodeImageFile reads a PNG or JPEG. Check its size with imageFileSize
+// first: decoding trusts the header.
 func decodeImageFile(path string) (image.Image, error) {
 	f, err := os.Open(path)
 	if err != nil {

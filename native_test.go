@@ -1,31 +1,51 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"image"
+	"image/draw"
+	"image/jpeg"
+	"math"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestCountImageRows(t *testing.T) {
+func TestImageListSizes(t *testing.T) {
 	head := "page   num  type   width height color comp bpc  enc interp  object ID x-ppi y-ppi size ratio\n" +
 		"--------------------------------------------------------------------------------------------\n"
 	row := "   1     0 image     800  1200  gray    1   1  image  no        20  0   200   200 20.2K 2.2%\n"
-	if n, err := countImageRows([]byte(head)); n != 0 || err != nil {
-		t.Errorf("no images: %d %v", n, err)
+	if s, err := imageListSizes([]byte(head)); len(s) != 0 || err != nil {
+		t.Errorf("no images: %v %v", s, err)
 	}
-	if n, err := countImageRows([]byte(head + row + row)); n != 2 || err != nil {
-		t.Errorf("two: %d %v", n, err)
+	if s, err := imageListSizes([]byte(head + row + row)); len(s) != 2 || s[0] != image.Pt(800, 1200) || err != nil {
+		t.Errorf("two: %v %v", s, err)
 	}
 	big := "   1     0 image    5000  1200  gray    1   1  image  no        20  0   200   200 20.2K 2.2%\n"
-	if _, err := countImageRows([]byte(head + big)); err == nil {
+	if _, err := imageListSizes([]byte(head + big)); err == nil {
 		t.Error("an image over 4000 px must fail the gate")
 	}
 	var many string
 	for range 17 {
 		many += row
 	}
-	if _, err := countImageRows([]byte(head + many)); err == nil {
+	if _, err := imageListSizes([]byte(head + many)); err == nil {
 		t.Error("17 images must fail the gate")
+	}
+	// It's a safety gate: what it can't read refuses rather than being skipped.
+	for name, out := range map[string]string{
+		"short row":   head + "   1     0 image\n",
+		"odd width":   head + "   1     0 image     8e2  1200  gray    1   1  image  no        20  0   200   200 20.2K 2.2%\n",
+		"no header":   row,
+		"empty":       "",
+		"zero height": head + "   1     0 image     800     0  gray    1   1  image  no        20  0   200   200 20.2K 2.2%\n",
+	} {
+		if _, err := imageListSizes([]byte(out)); err == nil {
+			t.Errorf("%s: must fail the gate", name)
+		}
 	}
 }
 
@@ -107,43 +127,221 @@ func TestNativeUPS2up(t *testing.T) {
 	}
 }
 
+func assertGray(t *testing.T, got, want *image.Gray, what string) {
+	t.Helper()
+	if got.Rect != want.Rect {
+		t.Fatalf("%s: %v, want %v", what, got.Rect, want.Rect)
+	}
+	for i := range got.Pix {
+		if got.Pix[i] != want.Pix[i] {
+			w := got.Rect.Dx()
+			t.Fatalf("%s: pixel (%d,%d) = %d, want %d", what, i%w, i/w, got.Pix[i], want.Pix[i])
+		}
+	}
+}
+
+// Every one of the 8 placements is accepted, as exactly the bitmap as
+// displayed: whole pixels or a fractional offset, and up against the page's
+// right and bottom edges (where poppler's render loses the last row and
+// column).
+func TestNativeAllPlacements(t *testing.T) {
+	src := labelBitmap(400, 600) // 2 × 3 in at 200 ppi
+	for _, at := range [][2]float64{{1, 1}, {1.013, 0.987}} {
+		for turns := range 4 {
+			for _, flip := range []bool{false, true} {
+				t.Run(fmt.Sprintf("at %v, turns %d, mirror %v", at, turns, flip), func(t *testing.T) {
+					t.Parallel()
+					var b pdfBuilder
+					p := b.page(letter, 0)
+					w, h := 2.0, 3.0
+					if turns%2 == 1 {
+						w, h = 3, 2
+					}
+					p.imageAs(src, at[0], at[1], w, h, flip, turns)
+					doc := openTest(t, b.bytes())
+					g, _, reason := doc.native(context.Background(), 1, boxIn(8.5, 11, at[0]-0.05, at[1]-0.05, w+0.1, h+0.1), canvas46)
+					if g == nil {
+						t.Fatalf("refused: %s", reason)
+					}
+					o := src.gray()
+					if flip {
+						o = mirror(o)
+					}
+					assertGray(t, g, fitCanvas(rotate(o, turns), canvas46), "label")
+				})
+			}
+		}
+	}
+	for _, c := range []struct {
+		w, h   int
+		pw, ph float64
+		cv     canvas
+	}{{800, 1200, 4, 6, canvas46}, {1700, 2200, 8.5, 11, canvas{W: 1726, H: 2233}}} {
+		t.Run(fmt.Sprintf("%d×%d filling the page", c.w, c.h), func(t *testing.T) {
+			t.Parallel()
+			var b pdfBuilder
+			im := labelBitmap(c.w, c.h)
+			b.page(inches(c.pw, c.ph), 0).image(im, 0, 0, c.pw, c.ph, 0)
+			g, _, reason := openTest(t, b.bytes()).native(context.Background(), 1, box{0, 0, 1, 1}, c.cv)
+			if g == nil {
+				t.Fatalf("refused: %s", reason)
+			}
+			assertGray(t, g, fitCanvas(im.gray(), c.cv), "label")
+		})
+	}
+}
+
 func TestNativeRefuses(t *testing.T) {
+	label := func(draw func(p *pdfPage)) []byte {
+		var b pdfBuilder
+		p := b.page(letter, 0)
+		im := labelBitmap(800, 1200)
+		im.fill(400, 100, 700, 300) // a solid block for a white box to hide
+		p.image(im, 1, 1, 4, 6, 0)
+		draw(p)
+		return b.bytes()
+	}
+	whiteBox := func(x, y, side float64) []byte {
+		return label(func(p *pdfPage) {
+			p.ops.WriteString("1 g\n")
+			p.fillRect(x, y, side, side)
+			p.ops.WriteString("0 g\n")
+		})
+	}
+	labelBox := func(pw, ph float64) box { return boxIn(pw, ph, 0.95, 0.95, 4.1, 6.1) }
 	cases := []struct {
-		name string
-		pdf  []byte
-		b    func(pw, ph float64) box
+		name, reason string
+		pdf          []byte
+		b            func(pw, ph float64) box
 	}{
-		{"300 ppi", fixUPS2up(false, 300), func(pw, ph float64) box { return boxIn(pw, ph, 0.7, 1.2, 2.8, 4.1) }},
-		{"stamped", fixStamped(), func(pw, ph float64) box { return boxIn(pw, ph, 2.2, 2.45, 4.1, 6.1) }},
-		{"two images in the box", fixUPS2up(false, 200), func(pw, ph float64) box { return box{0, 0, 1, 1} }},
+		{"300 ppi", "resolution", fixUPS2up(false, 300), func(pw, ph float64) box { return boxIn(pw, ph, 0.7, 1.2, 2.8, 4.1) }},
+		{"stamped", "doesn't match the render (", fixStamped(), func(pw, ph float64) box { return boxIn(pw, ph, 2.2, 2.45, 4.1, 6.1) }},
+		{"two images in the box", "covers", fixUPS2up(false, 200), func(pw, ph float64) box { return box{0, 0, 1, 1} }},
+		// a line of 4 pt text under the bitmap, inside the box: passthrough would drop it
+		{"text beside", "ink beside the image", label(func(p *pdfPage) { p.text(1.05, 7.2, 4, "REF 1Z999AA10123456784") }),
+			func(pw, ph float64) box { return boxIn(pw, ph, 0.97, 0.97, 4.06, 6.3) }},
+		// 4 pt text over a white part of the bitmap: too little ink to fail on share
+		{"text over", "in one spot", label(func(p *pdfPage) { p.text(1.5, 2.5, 4, "REF 1Z999AA10123456784") }), labelBox},
+		// white boxes hiding part of the bitmap, which passthrough would print
+		{"0.05 in white-out", "in one spot", whiteBox(3, 1.5, 0.05), labelBox},
+		{"0.2 in white-out", "in one spot", whiteBox(3, 1.5, 0.2), labelBox},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			doc := openTest(t, c.pdf)
 			pw, ph := doc.geom(1).inches()
-			if g, _, _ := doc.native(context.Background(), 1, c.b(pw, ph), canvas46); g != nil {
+			g, _, reason := doc.native(context.Background(), 1, c.b(pw, ph), canvas46)
+			if g != nil {
 				t.Fatal("passthrough must refuse this")
+			}
+			if !strings.Contains(reason, c.reason) {
+				t.Errorf("refused because %q, want %q", reason, c.reason)
 			}
 		})
 	}
 }
 
+// A 300 ppi full-page scan (the USPS shape) is refused on its header's size,
+// without decoding it.
+func TestNativeRefusesBeforeDecoding(t *testing.T) {
+	var b pdfBuilder
+	b.page(letter, 0).image(labelBitmap(2550, 3300), 0, 0, 8.5, 11, 0)
+	doc := openTest(t, b.bytes())
+	imgs := doc.pageImages(context.Background(), 1)
+	if len(imgs) != 1 || imgs[0].size != image.Pt(2550, 3300) {
+		t.Fatalf("images %+v", imgs)
+	}
+	if err := os.WriteFile(imgs[0].path, []byte("not an image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, reason := doc.native(context.Background(), 1, boxIn(8.5, 11, 1, 1, 4, 6), canvas46)
+	if !strings.Contains(reason, "resolution") {
+		t.Errorf("refused because %q: it decoded the image", reason)
+	}
+}
+
+// pdftohtml copies a DCT stream out as is, so a JPEG whose header claims
+// 60000 × 60000 behind a 100 × 100 dictionary must never be decoded.
+func TestNativeJPEGBomb(t *testing.T) {
+	var j bytes.Buffer
+	if err := jpeg.Encode(&j, newWhite(100, 100), nil); err != nil {
+		t.Fatal(err)
+	}
+	data := j.Bytes()
+	i := bytes.Index(data, []byte{0xFF, 0xC0}) // SOF0: length(2) precision(1) height(2) width(2)
+	data[i+5], data[i+6], data[i+7], data[i+8] = 0xEA, 0x60, 0xEA, 0x60
+	var b pdfBuilder
+	b.page(letter, 0).image(pdfImage{w: 100, h: 100, kind: "dct", dct: data}, 1, 1, 0.5, 0.5, 0)
+	doc := openTest(t, b.bytes())
+	if imgs := doc.pageImages(context.Background(), 1); len(imgs) != 0 {
+		t.Fatalf("kept %+v", imgs)
+	}
+	// The test is only worth something if pdftohtml really wrote the bomb.
+	files, _ := filepath.Glob(filepath.Join(doc.dir, "html-*", "*.jpg"))
+	if len(files) != 1 {
+		t.Fatalf("pdftohtml wrote %v", files)
+	}
+	if sz, err := imageFileSize(files[0]); err != nil || sz != image.Pt(60000, 60000) {
+		t.Fatalf("written jpeg is %v %v", sz, err)
+	}
+	if g, _, reason := doc.native(context.Background(), 1, boxIn(8.5, 11, 1, 1, 0.5, 0.5), canvas46); g != nil || !strings.Contains(reason, "covers") {
+		t.Errorf("native %v %q", g != nil, reason)
+	}
+}
+
+func TestCompareRender(t *testing.T) {
+	label := labelBitmap(200, 300).gray()
+	ref := newWhite(240, 340)
+	draw.Draw(ref, label.Rect.Add(image.Pt(20, 20)), label, image.Point{}, draw.Src)
+	at := image.Pt(20, 20)
+
+	if m := compareRender(ref, label, at); m.diff != 0 || m.tile != 0 || m.stray || m.refusal() != "" {
+		t.Errorf("identical: %+v", m)
+	}
+	if m := compareRender(ref, mirror(label), at); m.diff < 0.5 || m.refusal() == "" {
+		t.Errorf("mirrored: %+v", m)
+	}
+	if m := compareRender(newWhite(240, 340), newWhite(200, 300), at); !math.IsInf(m.diff, 1) || m.refusal() == "" {
+		t.Errorf("empty: %+v", m)
+	}
+	// ink in the render 3 px outside where the crop sits
+	stray := subGray(ref, ref.Rect)
+	stray.Pix[10*stray.Stride+120] = 0
+	if m := compareRender(stray, label, at); !m.stray || !strings.Contains(m.refusal(), "beside") {
+		t.Errorf("stray ink: %+v", m)
+	}
+	// an 8 × 8 hole in the corner block: a tiny share, but all in one tile
+	hole := subGray(ref, ref.Rect)
+	for y := 40; y < 48; y++ {
+		for x := 40; x < 48; x++ {
+			hole.Pix[y*hole.Stride+x] = 255
+		}
+	}
+	if m := compareRender(hole, label, at); m.diff >= verifyMaxDiff || m.tile <= verifyTileMax || !strings.Contains(m.refusal(), "in one spot") {
+		t.Errorf("hole: %+v", m)
+	}
+}
+
 func TestNativeDocTabShapes(t *testing.T) {
-	// fixture 8: browser-printed, 206 × 196 ppi, RGB, blank tab
+	// fixture 8: browser-printed, 206 × 196 ppi, RGB, blank tab. The crop is
+	// the 1202 px label's ink plus the 4 px margin (clamped to the bitmap),
+	// turned to portrait.
 	doc := openTest(t, fixReturn(0, 206, 196))
 	g, _, reason := doc.native(context.Background(), 1, boxIn(8.5, 11, 0.47, 4.47, 5.9, 4.15), canvas46)
 	if g == nil {
 		t.Fatalf("fixture 8: %s", reason)
 	}
-	assertPureLabel(t, g, canvas46)
+	assertGray(t, g, fitCanvas(subGray(docTabBitmap(0).gray(), image.Rect(0, 0, 1206, 800)), canvas46), "fixture 8")
 
-	// fixture 9: 4 × 6 page, the image turned and clipped by the page edge
+	// fixture 9: 4 × 6 page, the image turned clockwise and clipped by the
+	// page's bottom edge, which cuts off the blank tab
 	doc = openTest(t, fixClippedTab())
 	g, _, reason = doc.native(context.Background(), 1, box{0, 0, 1, 1}, canvas46)
 	if g == nil {
 		t.Fatalf("fixture 9: %s", reason)
 	}
-	assertPureLabel(t, g, canvas46)
+	assertGray(t, g, fitCanvas(subGray(rotate(docTabBitmap(0).gray(), 1), image.Rect(0, 0, 800, 1200)), canvas46), "fixture 9")
 	// the corner block, turned clockwise with the image, sits top right
 	if g.Pix[(9+40)*g.Stride+6+760] != 0 || g.Pix[(9+40)*g.Stride+6+40] != 255 {
 		t.Error("fixture 9: label isn't oriented as drawn")

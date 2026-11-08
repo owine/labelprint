@@ -238,15 +238,17 @@ func (d *pdfDoc) renderPages(ctx context.Context, pages []int, dpi float64, aa b
 	return out, nil
 }
 
-// renderBoxAt rasterises one box of a page at dpi, grayscale.
-func (d *pdfDoc) renderBoxAt(ctx context.Context, page int, b box, dpi float64, aa bool) (*image.Gray, error) {
+// renderBoxAt rasterises one box of a page, grayscale, at dpiX × dpiY (they
+// differ only for path A's check, which renders at the bitmap's own
+// resolution on each axis).
+func (d *pdfDoc) renderBoxAt(ctx context.Context, page int, b box, dpiX, dpiY float64, aa bool) (*image.Gray, error) {
 	pw, ph := d.geom(page).size()
-	r := b.pixels(pw/72*dpi, ph/72*dpi)
+	r := b.pixels(pw/72*dpiX, ph/72*dpiY)
 	if r.Dx() < 1 || r.Dy() < 1 {
 		return nil, fmt.Errorf("page %d: the box is empty", page)
 	}
 	base := d.scratch("box")
-	args := []string{"-png", "-gray", "-cropbox", "-r", fmtDPI(dpi)}
+	args := []string{"-png", "-gray", "-cropbox", "-rx", fmtDPI(dpiX), "-ry", fmtDPI(dpiY)}
 	if !aa {
 		args = append(args, "-aa", "no", "-aaVector", "no")
 	}
@@ -281,7 +283,7 @@ func (d *pdfDoc) renderLabel(ctx context.Context, page int, b box, cv canvas) (*
 		}
 		dpi = min(float64(cv.W)/bw, float64(cv.H)/bh)
 	}
-	g, err := d.renderBoxAt(ctx, page, b, dpi, false)
+	g, err := d.renderBoxAt(ctx, page, b, dpi, dpi, false)
 	if err != nil {
 		return nil, err
 	}
