@@ -43,6 +43,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.handleCancel)
 	mux.HandleFunc("POST /api/preview", s.handlePreview)
 	mux.HandleFunc("POST /api/print", s.handlePrint)
+	mux.HandleFunc("POST /api/printer/maintenance", s.handleMaintenance)
 
 	// An auth proxy's session cookie rides along on any request to this host,
 	// so a cross-site form POST could otherwise print. CrossOriginProtection rejects

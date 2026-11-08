@@ -546,6 +546,45 @@ function restoreCopies() {
   if (n > 1 && n <= state.maxCopies) $('copies').value = String(n);
 }
 
+// ---------------------------------------------------------------- feed a label
+
+// One ordinary zpl job through lprint, so it lands in the jobs table like a
+// print. The server holds the zpl; the page only names the action. The result
+// shows as a badge in the printer status, which is already a live region.
+let feedTimer;
+function feedStatus(tone, text) {
+  clearTimeout(feedTimer);
+  const s = $('feed-status');
+  s.className = `badge badge-${tone} feed-status`;
+  s.textContent = s.title = text;
+  s.hidden = !text;
+}
+
+$('feed').addEventListener('click', async () => {
+  const btn = $('feed');
+  btn.disabled = true;
+  btn.textContent = 'feeding…';
+  feedStatus('neutral', '');
+  try {
+    const r = await api('/api/printer/maintenance', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'feed' }),
+    });
+    r.jobs.forEach((j) => state.mine.add(j.id));
+    const warn = r.warnings?.length ? ` · ${r.warnings.join(', ')}` : '';
+    feedStatus('success', `feed sent · job ${r.jobs[0].id}${warn}`);
+    feedTimer = setTimeout(() => feedStatus('neutral', ''), 10000);
+  } catch (e) {
+    feedStatus('danger', `feed failed: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'feed a label';
+    loadJobs();
+    loadPrinter();
+  }
+});
+
 // ---------------------------------------------------------------- theme
 
 $('theme').addEventListener('click', () => {
