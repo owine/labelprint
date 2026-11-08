@@ -2,7 +2,7 @@ module github.com/owine/labelprint
 
 go 1.27.3
 
-require github.com/ingridhq/zebrash v1.38.0
+require github.com/Gobbo89/zebrash v1.41.1
 
 require (
 	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect

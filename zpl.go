@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/ingridhq/zebrash"
-	"github.com/ingridhq/zebrash/drawers"
+	"github.com/Gobbo89/zebrash"
+	"github.com/Gobbo89/zebrash/drawers"
 )
 
 // zplRenderer draws ZPL as PNG for the preview using zebrash, a pure-Go
