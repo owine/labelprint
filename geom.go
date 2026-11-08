@@ -194,8 +194,10 @@ func parseCrops(v string, selected []int, inches func(page int) (w, h float64)) 
 	}
 	out := map[int][]box{}
 	for k, list := range raw {
+		// Only the plain spelling: Atoi also takes "01" and "+1", which would
+		// let one page carry several lists.
 		p, err := strconv.Atoi(k)
-		if err != nil {
+		if err != nil || strconv.Itoa(p) != k {
 			return nil, fieldError("crops", "%q isn't a page number", k)
 		}
 		if !sel[p] {
@@ -204,8 +206,9 @@ func parseCrops(v string, selected []int, inches func(page int) (w, h float64)) 
 		if len(list) == 0 {
 			return nil, fieldError("crops", "page %d has no label boxes", p)
 		}
-		if len(list) > maxBoxesPerPage {
-			return nil, fieldError("crops", "page %d has %d label boxes; the most is %d", p, len(list), maxBoxesPerPage)
+		// Counted with what the page already has, in case a key ever aliases.
+		if n := len(out[p]) + len(list); n > maxBoxesPerPage {
+			return nil, fieldError("crops", "page %d has %d label boxes; the most is %d", p, n, maxBoxesPerPage)
 		}
 		pw, ph := inches(p)
 		for i, a := range list {

@@ -91,6 +91,12 @@ func TestParseCrops(t *testing.T) {
 		"off page":   `{"1": [[0.6,0,0.5,0.5]]}`,
 		"too small":  `{"1": [[0,0,0.05,0.5]]}`,
 		"nine boxes": `{"1": [` + strings.Repeat(`[0,0,0.1,0.1],`, 8) + `[0,0,0.1,0.1]]}`,
+		"leading 0":  `{"01": [[0,0,1,1]]}`,
+		"plus sign":  `{"+1": [[0,0,1,1]]}`,
+		"spaces":     `{" 1": [[0,0,1,1]]}`,
+		// one page spelled three ways: 17 boxes on page 1
+		"aliases": `{"1": [` + strings.Repeat(`[0,0,1,1],`, 7) + `[0,0,1,1]], "01": [` +
+			strings.Repeat(`[0,0,1,1],`, 7) + `[0,0,1,1]], "+1": [[0,0,1,1]]}`,
 	}
 	for name, v := range bad {
 		if _, err := parseCrops(v, sel, inch); err == nil {
