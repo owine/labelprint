@@ -244,9 +244,24 @@ tr.mine td.num { color: var(--accent); }
   position: absolute; left: 3px; top: 3px; font: 600 11px var(--font-mono); line-height: 1;
   padding: 2px 4px; border-radius: 3px; background: var(--accent); color: var(--on-accent);
 }
-/* a page with no label that isn't printing: its fallback box, for "include" */
-.crop.skipped { border-style: dashed; border-color: var(--fg-4); background: transparent; cursor: default; }
-.crop.skipped .crop-num { background: var(--fg-4); color: var(--card); }
+.crop-handle {
+  position: absolute; width: 12px; height: 12px; background: var(--accent); border: 2px solid #fff; border-radius: 3px;
+}
+/* a finger-sized target around the small square */
+.crop-handle::before { content: ''; position: absolute; inset: -8px; }
+.crop-handle[data-corner="nw"] { left: -7px; top: -7px; cursor: nwse-resize; }
+.crop-handle[data-corner="ne"] { right: -7px; top: -7px; cursor: nesw-resize; }
+.crop-handle[data-corner="sw"] { left: -7px; bottom: -7px; cursor: nesw-resize; }
+.crop-handle[data-corner="se"] { right: -7px; bottom: -7px; cursor: nwse-resize; }
+.crop-del {
+  position: absolute; right: 3px; top: 3px; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px;
+  background: var(--card); color: var(--ink); font: 500 15px/1 var(--font-sans); cursor: pointer;
+  box-shadow: var(--shadow-1); pointer-events: auto;
+}
+.crop-del:focus-visible { outline: none; box-shadow: var(--ring); }
+/* a page with no label that isn't printing: its fallback box, for "include" (or move it to include) */
+.crop.skipped { border-style: dashed; border-color: var(--fg-4); background: transparent; }
+.crop.skipped .crop-num, .crop.skipped .crop-handle { background: var(--fg-4); color: var(--card); }
 .crop-tab { position: absolute; border: 2px dashed var(--warning); pointer-events: none; }
 .crop-tab.on { border-style: solid; }
 .page-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }

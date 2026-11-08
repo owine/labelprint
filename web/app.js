@@ -56,7 +56,10 @@ function formData(extra = {}) {
 
 const MIN_IN = 0.5;   // the server refuses smaller boxes
 const MAX_BOXES = 8;  // per page, as the server allows
+const NUDGE_IN = 0.05;     // arrow keys move or resize a box this far
+const NUDGE_BIG_IN = 0.25; // with shift
 const round4 = (v) => Math.round(v * 1e4) / 1e4;
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const fmtIn = (v) => String(Math.round(v * 100) / 100);
 const arrBox = (a) => ({ x: a[0], y: a[1], w: a[2], h: a[3] });
 const cloneBoxes = (bs) => bs.map((b) => ({ ...b, tab: b.tab ? { ...b.tab } : null }));
@@ -145,6 +148,44 @@ function markEdited(pg) {
   renderPdf();
   updateSummary();
   schedulePreview();
+}
+
+// A moved or resized box no longer matches its detected doc tab.
+function boxChanged(pg, b) {
+  if (b.tab) {
+    b.tab = null;
+    b.choice = 'off';
+  }
+  markEdited(pg);
+}
+
+// Focus moves to the box that took the removed one's place, or to "add label"
+// when none is left, so the keyboard isn't dropped back at the top.
+function removeBox(pg, b) {
+  const i = pg.boxes.indexOf(b);
+  pg.boxes = pg.boxes.filter((x) => x !== b);
+  markEdited(pg);
+  if (!focusBox(pg, Math.min(i, pg.boxes.length - 1))) focusTool(pg, 'add');
+}
+
+// A centred box the size of the label, turned to the page's orientation and
+// shrunk to fit it; half the page each way when the label size is unknown.
+// On a skipped page the whole-page box wasn't printing, so the new box
+// replaces it rather than joining it.
+function addBox(pg) {
+  const m = state.pdf.media;
+  let w = 0.5, h = 0.5;
+  if (m) {
+    let mw = m.w, mh = m.h;
+    if ((pg.widthIn > pg.heightIn) !== (mw > mh)) [mw, mh] = [mh, mw];
+    const fit = Math.min(1, pg.widthIn / mw, pg.heightIn / mh);
+    w = (mw * fit) / pg.widthIn;
+    h = (mh * fit) / pg.heightIn;
+  }
+  if (pg.skipped && !pg.edited) pg.boxes = [];
+  pg.boxes.push({ x: (1 - w) / 2, y: (1 - h) / 2, w, h, autoIndex: null, tab: null, choice: 'off' });
+  markEdited(pg);
+  focusBox(pg, pg.boxes.length - 1);
 }
 
 // Drop a page's edits and go back to what detection found.
@@ -281,7 +322,12 @@ async function preview() {
     return;
   }
   if (seq !== state.previewSeq) return;
-  box.classList.remove('loading');
+  if (dragging) { heldPreview = { r, seq }; return; }
+  showPreview(r);
+}
+
+function showPreview(r) {
+  $('preview').classList.remove('loading');
   $('pages-hint').textContent = 'e.g. 1-3, 5';
   state.kind = r.kind;
   $('file-kind').textContent = r.kind;
@@ -334,6 +380,8 @@ function renderPdf() {
   const a = document.activeElement;
   const fig = a?.dataset?.tool ? a.closest('.pdf-page') : null;
   const focus = fig ? { page: fig.dataset.page, tool: a.dataset.tool } : null;
+  const crop = a?.closest?.('.crop');
+  const focusCrop = crop ? { page: crop.dataset.page, index: crop.dataset.index, del: a !== crop } : null;
   const { selected, pageCount } = state.pdf.meta;
   const shown = state.pdf.pages.size;
   const n = pdfLabelCount();
@@ -343,6 +391,7 @@ function renderPdf() {
     (selected > shown ? ` · showing the first ${shown} pages` : '');
   grid.replaceChildren(...[...state.pdf.pages.values()].map(pageFigure));
   if (focus) focusTool({ page: focus.page }, focus.tool);
+  if (focusCrop) focusBox({ page: focusCrop.page }, focusCrop.index, focusCrop.del);
 }
 
 function pageCaption(pg) {
@@ -373,11 +422,18 @@ function pageFigure(pg) {
     include.addEventListener('click', () => { pg.edited = true; markEdited(pg); focusTool(pg, 'reset'); });
     tools.append(include);
   }
+  const add = el('button', { type: 'button', className: 'btn btn-ghost btn-sm', textContent: 'add label' });
+  add.setAttribute('aria-label', `add a label area to page ${pg.page}`);
+  add.dataset.tool = 'add';
+  add.disabled = flatBoxes(pg).length >= MAX_BOXES;
+  if (add.disabled) add.title = `${MAX_BOXES} label areas is the most a page can have`;
+  add.addEventListener('click', () => addBox(pg));
+  tools.append(add);
   if (pg.edited) {
     const reset = el('button', { type: 'button', className: 'btn btn-ghost btn-sm', textContent: 'reset' });
     reset.setAttribute('aria-label', `reset page ${pg.page}`);
     reset.dataset.tool = 'reset';
-    reset.addEventListener('click', () => { resetPage(pg); focusTool(pg, 'include'); });
+    reset.addEventListener('click', () => { resetPage(pg); if (!focusTool(pg, 'include')) focusTool(pg, 'add'); });
     tools.append(reset);
   }
   if (!pg.boxes.length) tools.append(el('span', { className: 'badge badge-warning', textContent: 'no labels' }));
@@ -391,20 +447,140 @@ function pageFigure(pg) {
 // The page is redrawn on every change, so a button that swaps for another
 // (include ↔ reset) hands keyboard focus to its replacement.
 function focusTool(pg, tool) {
-  $('preview-grid').querySelector(`.pdf-page[data-page="${pg.page}"] [data-tool="${tool}"]`)?.focus();
+  return focusEl($('preview-grid').querySelector(`.pdf-page[data-page="${pg.page}"] [data-tool="${tool}"]`));
+}
+
+// the box itself, or its × button
+function focusBox(pg, i, del = false) {
+  const sel = `.crop[data-page="${pg.page}"][data-index="${i}"]` + (del ? ' .crop-del' : '');
+  return focusEl($('preview-grid').querySelector(sel));
+}
+
+function focusEl(node) {
+  if (!node || node.disabled) return false;
+  node.focus();
+  return true;
 }
 
 function place(node, b) {
   Object.assign(node.style, { left: `${b.x * 100}%`, top: `${b.y * 100}%`, width: `${b.w * 100}%`, height: `${b.h * 100}%` });
 }
 
+// A box: drag it to move it, drag a corner to resize it, × to remove it.
+// Focused, arrow keys nudge it, alt+arrow resizes it from the bottom-right
+// corner, delete removes it. On a skipped page (shown, not printing) a move or
+// resize includes the page, like "include" and then the edit; it has no × since
+// there is nothing printing to take away.
 function boxEl(pg, b, i) {
-  const node = el('div', { className: 'crop' });
+  const skipped = pg.skipped && !pg.edited;
+  const node = el('div', { className: 'crop', tabIndex: 0 });
   node.dataset.page = pg.page;
   node.dataset.index = i;
+  node.setAttribute('role', 'group');
+  const size = `${fmtIn(b.w * pg.widthIn)} × ${fmtIn(b.h * pg.heightIn)} in`;
+  node.setAttribute('aria-label', skipped
+    ? `label area ${i + 1} on page ${pg.page}, ${size}, not printing: move or resize it to include the page`
+    : `label area ${i + 1} on page ${pg.page}, ${size}: drag or arrow keys to move, ` +
+      'corners or alt+arrow keys to resize, delete to remove');
   place(node, b);
   node.append(el('span', { className: 'crop-num', textContent: i + 1 }));
+  for (const corner of ['nw', 'ne', 'sw', 'se']) {
+    const h = el('span', { className: 'crop-handle' });
+    h.dataset.corner = corner;
+    node.append(h);
+  }
+  if (!skipped) {
+    const del = el('button', { type: 'button', className: 'crop-del', textContent: '×' });
+    del.setAttribute('aria-label', `remove label area ${i + 1} from page ${pg.page}`);
+    del.addEventListener('pointerdown', (e) => e.stopPropagation());
+    del.addEventListener('click', () => removeBox(pg, b));
+    node.append(del);
+  }
+  node.addEventListener('pointerdown', (e) => startDrag(e, pg, b, node, e.target.dataset?.corner || null));
+  node.addEventListener('keydown', (e) => keyBox(e, pg, b, node));
   return node;
+}
+
+// A preview reply that lands mid-drag is held until the drag ends: redrawing
+// would swap the box being dragged for a new node and end the drag.
+let dragging = false;
+let heldPreview = null;
+
+function startDrag(e, pg, b, node, corner) {
+  if (e.button !== 0 || dragging) return;
+  e.preventDefault();
+  node.focus();
+  const stage = node.parentElement.getBoundingClientRect();
+  const o = { ...b };
+  const mw = MIN_IN / pg.widthIn;
+  const mh = MIN_IN / pg.heightIn;
+  let moved = false;
+  dragging = true;
+  node.setPointerCapture(e.pointerId);
+  const move = (ev) => {
+    if (ev.pointerId !== e.pointerId) return;
+    moved ||= Math.abs(ev.clientX - e.clientX) + Math.abs(ev.clientY - e.clientY) > 2;
+    if (!moved) return; // a click, not a drag
+    const dx = (ev.clientX - e.clientX) / stage.width;
+    const dy = (ev.clientY - e.clientY) / stage.height;
+    if (!corner) {
+      b.x = clamp(o.x + dx, 0, 1 - o.w);
+      b.y = clamp(o.y + dy, 0, 1 - o.h);
+    } else {
+      let x0 = o.x, y0 = o.y, x1 = o.x + o.w, y1 = o.y + o.h;
+      if (corner.includes('w')) x0 = clamp(x0 + dx, 0, x1 - mw); else x1 = clamp(x1 + dx, x0 + mw, 1);
+      if (corner.includes('n')) y0 = clamp(y0 + dy, 0, y1 - mh); else y1 = clamp(y1 + dy, y0 + mh, 1);
+      Object.assign(b, { x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+    }
+    place(node, b);
+  };
+  // pointerup commits; pointercancel (the browser took the pointer) puts the
+  // box back; losing capture any other way commits what was dragged.
+  const end = (ev) => {
+    if (ev.pointerId !== e.pointerId) return;
+    node.removeEventListener('pointermove', move);
+    node.removeEventListener('pointerup', end);
+    node.removeEventListener('pointercancel', end);
+    node.removeEventListener('lostpointercapture', end);
+    if (node.hasPointerCapture(e.pointerId)) node.releasePointerCapture(e.pointerId);
+    if (ev.type === 'pointercancel' && moved) {
+      Object.assign(b, o);
+      place(node, b);
+      moved = false;
+    }
+    dragging = false;
+    const held = heldPreview;
+    heldPreview = null;
+    if (moved) boxChanged(pg, b); // re-previews, superseding the held reply
+    else if (held?.seq === state.previewSeq) showPreview(held.r);
+  };
+  node.addEventListener('pointermove', move);
+  node.addEventListener('pointerup', end);
+  node.addEventListener('pointercancel', end);
+  node.addEventListener('lostpointercapture', end);
+}
+
+function keyBox(e, pg, b, node) {
+  if (e.target !== node) return; // keys on the × are the button's
+  if (e.key === 'Delete' || e.key === 'Backspace') {
+    e.preventDefault();
+    if (!(pg.skipped && !pg.edited)) removeBox(pg, b);
+    return;
+  }
+  const step = e.shiftKey ? NUDGE_BIG_IN : NUDGE_IN;
+  const dx = { ArrowLeft: -step, ArrowRight: step }[e.key] || 0;
+  const dy = { ArrowUp: -step, ArrowDown: step }[e.key] || 0;
+  if (!dx && !dy) return;
+  e.preventDefault();
+  const was = [b.x, b.y, b.w, b.h];
+  if (e.altKey) {
+    b.w = clamp(b.w + dx / pg.widthIn, Math.min(b.w, MIN_IN / pg.widthIn), 1 - b.x);
+    b.h = clamp(b.h + dy / pg.heightIn, Math.min(b.h, MIN_IN / pg.heightIn), 1 - b.y);
+  } else {
+    b.x = clamp(b.x + dx / pg.widthIn, 0, 1 - b.w);
+    b.y = clamp(b.y + dy / pg.heightIn, 0, 1 - b.h);
+  }
+  if ([b.x, b.y, b.w, b.h].some((v, k) => v !== was[k])) boxChanged(pg, b);
 }
 
 function tabOutline(pg, b) {
