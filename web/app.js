@@ -372,6 +372,7 @@ async function loadJobs() {
     busy = jobs.some((j) => !terminal.has(j.state));
     if (state.lastResult) renderPrintResult(jobs);
   } catch (e) {
+    lastJobs = null;
     $('jobs-body').replaceChildren(el('tr', {}, el('td', { colSpan: 4, className: 'muted', textContent: e.message })));
   }
   // poll quickly while something is in flight, lazily otherwise
@@ -379,11 +380,15 @@ async function loadJobs() {
 }
 
 function renderJobs(jobs) {
+  lastJobs = jobs;
+  pruneCancels(jobs);
   const body = $('jobs-body');
   if (!jobs.length) {
     body.replaceChildren(el('tr', {}, el('td', { colSpan: 4, className: 'muted', textContent: 'no jobs yet' })));
     return;
   }
+  // the table is rebuilt on every poll; keep keyboard focus on a cancel button
+  const focused = document.activeElement?.dataset?.cancel;
   body.replaceChildren(...jobs.map((j) => {
     const name = el('td', { className: 'name', textContent: j.name || 'untitled' });
     const sub = [j.user, j.state !== 'completed' ? j.message : ''].filter(Boolean).join(' · ');
@@ -393,9 +398,91 @@ function renderJobs(jobs) {
     return el('tr', { className: state.mine.has(j.id) ? 'mine' : '' },
       el('td', { className: 'num', textContent: j.id }),
       name,
-      el('td', {}, el('span', { className: 'badge ' + (stateBadge[j.state] || 'badge-neutral'), textContent: j.state })),
+      el('td', {}, el('div', { className: 'job-state' },
+        el('span', { className: 'badge ' + (stateBadge[j.state] || 'badge-neutral'), textContent: j.state }),
+        ...cancelControls(j))),
       when);
   }));
+  if (focused) body.querySelector(`[data-cancel="${focused}"]`)?.focus();
+}
+
+// ---------------------------------------------------------------- cancel
+
+// A held or pending job prints the moment the printer comes back, so any job
+// still in lprint's queue can be canceled. Canceling can't be undone, so it
+// takes two clicks: "cancel", then "confirm?" within a few seconds. Progress
+// and lprint's answer live here, outside the rows, because every poll
+// rebuilds the table.
+const cancelable = new Set(['pending', 'held', 'processing', 'stopped']);
+const cancels = new Map(); // job id → { step: armed | sending | sent | error, msg, timer }
+let lastJobs = null;       // the list on screen, to redraw without a fetch
+
+function setCancel(id, entry, ttl) {
+  clearTimeout(cancels.get(id)?.timer);
+  if (entry) {
+    cancels.set(id, entry);
+    if (ttl) entry.timer = setTimeout(() => { if (cancels.get(id) === entry) setCancel(id, null); }, ttl);
+  } else {
+    cancels.delete(id);
+  }
+  if (lastJobs) renderJobs(lastJobs);
+}
+
+// drop what no longer applies: jobs that left the list, and finished jobs
+// (an error stays until it times out, so "already completed" can be read)
+function pruneCancels(jobs) {
+  const byId = new Map(jobs.map((j) => [j.id, j]));
+  for (const [id, c] of cancels) {
+    const j = byId.get(id);
+    if (!j || (terminal.has(j.state) && c.step !== 'error')) {
+      clearTimeout(c.timer);
+      cancels.delete(id);
+    }
+  }
+}
+
+function cancelControls(j) {
+  const c = cancels.get(j.id);
+  const out = [];
+  if (cancelable.has(j.state)) {
+    if (c?.step === 'sent') {
+      // a processing job stops at the next page, so it can linger a moment
+      out.push(el('span', { className: 'sub', textContent: 'canceling…' }));
+    } else {
+      const armed = c?.step === 'armed';
+      const sending = c?.step === 'sending';
+      const btn = el('button', {
+        type: 'button',
+        className: 'btn btn-ghost btn-sm job-cancel' + (armed ? ' armed' : ''),
+        textContent: sending ? 'canceling…' : armed ? 'confirm?' : 'cancel',
+      });
+      btn.dataset.cancel = j.id;
+      btn.setAttribute('aria-label', armed ? `confirm canceling job ${j.id}` : `cancel job ${j.id}`);
+      // aria-disabled rather than disabled, so keyboard focus survives the redraw
+      if (sending) btn.setAttribute('aria-disabled', 'true');
+      btn.addEventListener('click', () => cancelClick(j.id));
+      out.push(btn);
+    }
+  }
+  if (c?.step === 'error') out.push(el('span', { className: 'sub cancel-error', textContent: c.msg }));
+  return out;
+}
+
+async function cancelClick(id) {
+  const step = cancels.get(id)?.step;
+  if (step === 'sending' || step === 'sent') return;
+  if (step !== 'armed') {
+    setCancel(id, { step: 'armed' }, 4000);
+    return;
+  }
+  setCancel(id, { step: 'sending' });
+  try {
+    await api(`/api/jobs/${id}/cancel`, { method: 'POST' });
+    setCancel(id, { step: 'sent' });
+  } catch (e) {
+    setCancel(id, { step: 'error', msg: e.message }, 10000);
+  }
+  loadJobs();
 }
 
 // ---------------------------------------------------------------- paste

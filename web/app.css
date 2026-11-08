@@ -180,6 +180,11 @@ td.num, td.when { font-family: var(--font-mono); font-size: var(--fs-13); color:
 td .sub { display: block; font-size: var(--fs-13); color: var(--fg-3); margin-top: 2px; }
 td.name { overflow-wrap: anywhere; min-width: 160px; }
 tr.mine td.num { color: var(--accent); }
+.job-state { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.job-cancel { padding: 4px 8px; } /* text lines up with the badge's */
+.job-cancel.armed, .job-cancel.armed:hover { background: var(--danger-soft); color: var(--danger); }
+.job-cancel[aria-disabled="true"] { color: var(--fg-4); background: transparent; cursor: progress; }
+.job-state .cancel-error { color: var(--danger); margin-top: 0; max-width: 24ch; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }

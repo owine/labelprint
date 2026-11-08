@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"image/png"
 	"io"
 	"log/slog"
@@ -15,8 +16,8 @@ import (
 	"testing"
 )
 
-// fakeLPrint answers the three operations the app uses and records every
-// request it gets, decoded.
+// fakeLPrint answers the operations the app uses and records every request it
+// gets, decoded.
 type fakeLPrint struct {
 	t        *testing.T
 	mu       sync.Mutex
@@ -27,6 +28,10 @@ type fakeLPrint struct {
 	printMessage string
 	reasons      []string
 }
+
+// cancelStates are the jobs Cancel-Job knows, by id: the two Get-Jobs lists
+// (completed, aborted) plus a held one. Any other id isn't found, as in PAPPL.
+var cancelStates = map[int]int{1: 9, 2: 8, 3: 4}
 
 func (f *fakeLPrint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
@@ -82,6 +87,21 @@ func (f *fakeLPrint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			resp.integer(tagEnum, "job-state", st)
 			resp.str(tagText, "job-state-message", "Unable to connect to printer.")
 		}
+	case opCancelJob:
+		// PAPPL's messages: client-ipp.c ("job-id %d not found.") and
+		// job-ipp.c ipp_cancel_job ("Job #%d is already %s - can't cancel.").
+		id := opAttr(m, "job-id").int()
+		st, ok := cancelStates[id]
+		switch {
+		case !ok:
+			resp = newIPPResponse(0x0406, m.RequestID)
+			resp.str(tagText, "status-message", fmt.Sprintf("job-id %d not found.", id))
+		case st >= 7:
+			resp = newIPPResponse(0x0404, m.RequestID)
+			resp.str(tagText, "status-message", fmt.Sprintf("Job #%d is already %s - can't cancel.", id, jobStates[st]))
+		default:
+			resp = newIPPResponse(0, m.RequestID)
+		}
 	default:
 		resp = newIPPResponse(0x0501, m.RequestID)
 	}
@@ -89,12 +109,14 @@ func (f *fakeLPrint) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(resp.mustBytes(f.t))
 }
 
-func (f *fakeLPrint) printJobs() []*ippMessage {
+func (f *fakeLPrint) printJobs() []*ippMessage { return f.ops(opPrintJob) }
+
+func (f *fakeLPrint) ops(op uint16) []*ippMessage {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []*ippMessage
 	for _, m := range f.requests {
-		if m.Code == opPrintJob {
+		if m.Code == op {
 			out = append(out, m)
 		}
 	}
@@ -452,5 +474,133 @@ func TestStaticAndHeaders(t *testing.T) {
 		if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'self'") {
 			t.Errorf("%s: csp = %q", path, csp)
 		}
+	}
+}
+
+// ---------------------------------------------------------------- cancel
+
+func cancelJob(t *testing.T, h http.Handler, id, site string) (*httptest.ResponseRecorder, map[string]any) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/jobs/"+id+"/cancel", nil)
+	if site != "" {
+		req.Header.Set("Sec-Fetch-Site", site)
+	}
+	req.Header.Set("Remote-User", "alice")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var out map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec, out
+}
+
+func TestCancelJob(t *testing.T) {
+	fake, h := newTestServer(t)
+	rec, out := cancelJob(t, h, "3", "same-origin")
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	if out["id"] != 3.0 {
+		t.Errorf("response = %v", out)
+	}
+	reqs := fake.ops(opCancelJob)
+	if len(reqs) != 1 {
+		t.Fatalf("%d Cancel-Jobs, want 1", len(reqs))
+	}
+	m := reqs[0]
+	// RFC 8011 §4.1.5: charset, language, then the target (printer-uri +
+	// job-id), then requesting-user-name.
+	var names []string
+	for _, a := range m.group(tagOperationGroup).Attrs {
+		names = append(names, a.Name)
+	}
+	want := []string{"attributes-charset", "attributes-natural-language", "printer-uri", "job-id", "requesting-user-name"}
+	if fmt.Sprint(names) != fmt.Sprint(want) {
+		t.Errorf("operation attributes = %v, want %v", names, want)
+	}
+	if a := opAttr(m, "job-id"); a == nil || a.Tag != tagInteger || a.int() != 3 {
+		t.Errorf("job-id = %+v", a)
+	}
+	if got := opAttr(m, "printer-uri").str(); !strings.HasSuffix(got, "/ipp/print/Zebra-GX420t") {
+		t.Errorf("printer-uri = %q", got)
+	}
+	// the same user the print path sends, so PAPPL sees the job's owner
+	if a := opAttr(m, "requesting-user-name"); a == nil || a.Tag != tagName || a.str() != "alice" {
+		t.Errorf("requesting-user-name = %+v", a)
+	}
+	if len(m.groups(tagJobGroup)) != 0 || len(m.Data) != 0 {
+		t.Error("Cancel-Job carries no job attributes or document")
+	}
+}
+
+func TestCancelJobRejectsBadIDs(t *testing.T) {
+	for _, id := range []string{"0", "-1", "+3", "03", "3.0", "3e2", "abc", "%20", "0x3", "2147483648", "99999999999999999999"} {
+		t.Run(id, func(t *testing.T) {
+			fake, h := newTestServer(t)
+			rec, out := cancelJob(t, h, id, "same-origin")
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body)
+			}
+			if msg, _ := out["error"].(string); msg == "" {
+				t.Error("no error message")
+			}
+			if len(fake.ops(opCancelJob)) != 0 {
+				t.Error("a bad id reached lprint")
+			}
+		})
+	}
+}
+
+func TestCancelJobOnlyPOST(t *testing.T) {
+	fake, h := newTestServer(t)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/jobs/3/cancel", nil))
+	// a GET falls through to the static files ("GET /"), like GET /api/print
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("GET: status %d", rec.Code)
+	}
+	if len(fake.ops(opCancelJob)) != 0 {
+		t.Fatal("a GET reached lprint")
+	}
+}
+
+func TestCancelJobShowsLPrintError(t *testing.T) {
+	cases := map[string][]string{
+		"1":  {"client-error-not-possible", "Job #1 is already completed - can't cancel."},
+		"2":  {"client-error-not-possible", "Job #2 is already aborted - can't cancel."},
+		"42": {"client-error-not-found", "job-id 42 not found."},
+	}
+	for id, want := range cases {
+		t.Run(id, func(t *testing.T) {
+			_, h := newTestServer(t)
+			rec, out := cancelJob(t, h, id, "same-origin")
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body)
+			}
+			msg, _ := out["error"].(string)
+			for _, w := range want {
+				if !strings.Contains(msg, w) {
+					t.Errorf("error = %q, want it to contain %q", msg, w)
+				}
+			}
+		})
+	}
+}
+
+func TestCancelJobWhenLPrintDown(t *testing.T) {
+	_, h := newTestServer(t, func(c *config) { c.LPrintURI = "ipp://127.0.0.1:1/ipp/print/x" })
+	rec, out := cancelJob(t, h, "3", "same-origin")
+	if msg, _ := out["error"].(string); rec.Code != http.StatusBadGateway || !strings.Contains(msg, "can't reach lprint at 127.0.0.1:1") {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestCancelJobCrossSiteRejected(t *testing.T) {
+	fake, h := newTestServer(t)
+	rec, _ := cancelJob(t, h, "3", "cross-site")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status %d", rec.Code)
+	}
+	if len(fake.ops(opCancelJob)) != 0 {
+		t.Fatal("cross-site request reached lprint")
 	}
 }
