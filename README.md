@@ -159,3 +159,7 @@ MIT, see [LICENSE](LICENSE). The bundled web fonts are under the SIL Open Font L
 Serif ([`OFL-instrumentserif.txt`](web/fonts/OFL-instrumentserif.txt)). ZPL previews use
 [zebrash](https://github.com/Gobbo89/zebrash) (MIT), the maintained fork of
 [ingridhq/zebrash](https://github.com/ingridhq/zebrash).
+
+The labelprint binary and container images are based in part on the work of the FreeType Team: zebrash draws text
+with [golang/freetype](https://github.com/golang/freetype), a Go port of [FreeType](https://www.freetype.org), used
+under the FreeType License ([FTL](https://github.com/golang/freetype/blob/master/licenses/ftl.txt)).
