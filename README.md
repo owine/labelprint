@@ -10,7 +10,7 @@ addresses.
 browser ──▶ reverse proxy + auth ──▶ labelprint (container) ──IPP Print-Job──▶ LPrint ──▶ Zebra printer
 ```
 
-Built and tested against a Zebra GK420t (203 dpi) on LPrint, with 4×6 in shipping labels. Other printers LPrint
+Built and tested against a Zebra GX420t (203 dpi) on LPrint, with 4×6 in shipping labels. Other printers LPrint
 drives should work; set `RENDER_DPI` to match.
 
 > [!IMPORTANT]
@@ -61,7 +61,7 @@ All settings are environment variables. Only `LPRINT_URI` is required.
 
 | variable | default | |
 |---|---|---|
-| `LPRINT_URI` | *(required)* | the LPrint queue, e.g. `ipp://lprint-host:8000/ipp/print/Zebra-GK420t` (`ipp://` or `ipps://`; port 631 if none is given). labelprint won't start without it |
+| `LPRINT_URI` | *(required)* | the LPrint queue, e.g. `ipp://lprint-host:8000/ipp/print/Zebra-GX420t` (`ipp://` or `ipps://`; port 631 if none is given). labelprint won't start without it |
 | `DEFAULT_MEDIA` | `na_index-4x6_4x6in` | preselected size. Falls back to LPrint's `media-default` if LPrint doesn't list it |
 | `MAX_UPLOAD_MB` | `20` | upload cap |
 | `MAX_PAGES` | `50` | most PDF pages one print may send |
@@ -92,7 +92,7 @@ services:
       - /tmp:size=128m        # a PDF and its rendered pages, briefly
     mem_limit: 512m
     environment:
-      LPRINT_URI: "ipp://lprint-host.lan:8000/ipp/print/Zebra-GK420t"
+      LPRINT_URI: "ipp://lprint-host.lan:8000/ipp/print/Zebra-GX420t"
     healthcheck:
       test: ["CMD", "/usr/local/bin/labelprint", "healthcheck"]
 ```
@@ -101,7 +101,7 @@ Or, to try it on its own:
 
 ```sh
 docker run --rm -p 8080:8080 --read-only --cap-drop ALL --tmpfs /tmp \
-  -e LPRINT_URI=ipp://lprint-host.lan:8000/ipp/print/Zebra-GK420t ghcr.io/owine/labelprint:latest
+  -e LPRINT_URI=ipp://lprint-host.lan:8000/ipp/print/Zebra-GX420t ghcr.io/owine/labelprint:latest
 ```
 
 Notes:
@@ -123,7 +123,7 @@ You need Go (version in `go.mod`), and poppler (`brew install poppler`) for the 
 
 ```sh
 go test -race ./...
-LPRINT_URI=ipp://lprint-host.lan:8000/ipp/print/Zebra-GK420t LISTEN_ADDR=127.0.0.1:8080 go run .
+LPRINT_URI=ipp://lprint-host.lan:8000/ipp/print/Zebra-GX420t LISTEN_ADDR=127.0.0.1:8080 go run .
 docker buildx build --platform linux/arm64 -t labelprint:test --load .
 ```
 

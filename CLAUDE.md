@@ -9,7 +9,7 @@ current release is the latest published GitHub Release (`gh release view`).
 ## What it is
 
 A single Go binary that serves an embedded page (`web/`) and talks IPP to LPrint, which runs
-on the Docker host (not in a container) and drives the label printer; developed against a Zebra GK420t. It
+on the Docker host (not in a container) and drives the label printer; developed against a Zebra GX420t. It
 runs behind a reverse proxy with an auth layer, since it has no login of its own. `deploy/compose.yaml` is an
 example stack. The repo is public: keep real hostnames, addresses and deployment details out of it.
 
