@@ -611,3 +611,34 @@ func TestCancelJobCrossSiteRejected(t *testing.T) {
 		t.Fatal("cross-site request reached lprint")
 	}
 }
+
+func TestErrorsNameTheirField(t *testing.T) {
+	requirePoppler(t)
+	_, h := newTestServer(t, func(c *config) { c.MaxPages = 2 })
+	cases := []struct {
+		name   string
+		fields map[string]string
+		field  string
+	}{
+		{"bad range", map[string]string{"pages": "9"}, "pages"},
+		{"too many pages, preview too", nil, "pages"},
+		{"field over its cap", map[string]string{"pages": strings.Repeat("1,", 200)}, "pages"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			rec, out := post(t, h, "/api/preview", "x.pdf", makeLabelPDF(3), c.fields)
+			if rec.Code != 400 || out["field"] != c.field {
+				t.Fatalf("status %d, field %v: %s", rec.Code, out["field"], rec.Body)
+			}
+		})
+	}
+}
+
+func TestCropsFieldMayExceed256Bytes(t *testing.T) {
+	_, h := newTestServer(t)
+	// ZPL ignores crops; this only proves the field isn't cut or refused.
+	rec, _ := post(t, h, "/api/preview", "a.zpl", []byte("^XA^XZ"), map[string]string{"crops": strings.Repeat(" ", 1000) + "{}"})
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+}

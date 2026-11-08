@@ -186,6 +186,13 @@ type upload struct {
 	Fields   map[string]string
 }
 
+// Form fields other than the file are small. crops can carry up to 8 boxes
+// for each previewed page; every other field fits in defaultFieldCap. Going
+// over a cap is an error, never a silent cut.
+var fieldCaps = map[string]int{"crops": 16 << 10}
+
+const defaultFieldCap = 256
+
 // readUpload streams the multipart body into memory (no temp files: the root
 // filesystem is read-only and 20 MB fits comfortably in RAM) and sniffs the
 // document type.
@@ -220,11 +227,19 @@ func (s *server) readUpload(w http.ResponseWriter, r *http.Request) (*upload, er
 			up.Filename, up.Data = cleanFilename(part.FileName()), data
 			continue
 		}
-		v, err := io.ReadAll(io.LimitReader(part, 256))
+		name := truncateUTF8(part.FormName(), 40)
+		limit := defaultFieldCap
+		if c, ok := fieldCaps[name]; ok {
+			limit = c
+		}
+		v, err := io.ReadAll(io.LimitReader(part, int64(limit)+1))
 		if isMaxBytes(err) {
 			return nil, tooBig
 		}
-		up.Fields[part.FormName()] = strings.TrimSpace(string(v))
+		if len(v) > limit {
+			return nil, fieldError(name, "%s is too long", name)
+		}
+		up.Fields[name] = strings.TrimSpace(string(v))
 	}
 	if up.Data == nil {
 		return nil, badRequest("choose a file first")
@@ -317,6 +332,10 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		pages, err := parsePageRange(up.Fields["pages"], doc.Pages)
 		if err != nil {
 			s.fail(w, err)
+			return
+		}
+		if len(pages) > s.cfg.MaxPages {
+			s.fail(w, tooManyPages(len(pages), s.cfg.MaxPages))
 			return
 		}
 		resp.PageCount, resp.Selected = doc.Pages, len(pages)
@@ -451,7 +470,7 @@ func (s *server) buildJobs(ctx context.Context, up *upload, copies int, media, u
 			return nil, err
 		}
 		if len(pages) > s.cfg.MaxPages {
-			return nil, badRequest("that's %d pages; the limit is %d per print — pick a page range", len(pages), s.cfg.MaxPages)
+			return nil, tooManyPages(len(pages), s.cfg.MaxPages)
 		}
 		rendered, err := doc.render(ctx, pages)
 		if err != nil {
@@ -482,6 +501,10 @@ func repeatZPL(data []byte, n int) []byte {
 		unit = append(append([]byte(nil), unit...), '\n')
 	}
 	return bytes.Repeat(unit, n)
+}
+
+func tooManyPages(n, limit int) error {
+	return fieldError("pages", "that's %d pages; the limit is %d per print — pick a page range", n, limit)
 }
 
 func parseCopies(s string, maxCopies int) (int, error) {
@@ -521,17 +544,21 @@ func gateway(err error) error { return &gatewayError{err} }
 
 func (s *server) fail(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
+	body := map[string]string{"error": err.Error()}
 	var ue *userError
 	var ge *gatewayError
 	switch {
 	case errors.As(err, &ue):
 		status = ue.Status
+		if ue.Field != "" {
+			body["field"] = ue.Field
+		}
 	case errors.As(err, &ge):
 		status = http.StatusBadGateway
 	default:
 		s.log.Error("request failed", "error", err)
 	}
-	writeJSON(w, status, map[string]string{"error": err.Error()})
+	writeJSON(w, status, body)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -32,16 +32,22 @@ func (k docKind) mimeType() string {
 }
 
 // userError is a problem with the upload itself, shown to the user verbatim
-// with a 4xx status.
+// with a 4xx status. Field names the form field at fault, if any, so the page
+// can flag that input.
 type userError struct {
 	Status int
 	Msg    string
+	Field  string
 }
 
 func (e *userError) Error() string { return e.Msg }
 
 func badRequest(format string, a ...any) *userError {
 	return &userError{Status: 400, Msg: fmt.Sprintf(format, a...)}
+}
+
+func fieldError(field, format string, a ...any) *userError {
+	return &userError{Status: 400, Msg: fmt.Sprintf(format, a...), Field: field}
 }
 
 // detectKind sniffs content first and trusts the extension only for ZPL, which
@@ -125,23 +131,23 @@ func parsePageRange(spec string, total int) ([]int, error) {
 		lo, hi, isRange := strings.Cut(part, "-")
 		first, err := pageNum(lo, 1)
 		if err != nil {
-			return nil, badRequest("can't read page %q in %q", part, spec)
+			return nil, fieldError("pages", "can't read page %q in %q", part, spec)
 		}
 		last := first
 		if isRange {
 			if last, err = pageNum(hi, total); err != nil {
-				return nil, badRequest("can't read page %q in %q", part, spec)
+				return nil, fieldError("pages", "can't read page %q in %q", part, spec)
 			}
 		}
 		if first < 1 || last > total || first > last {
-			return nil, badRequest("pages %q are outside this pdf's 1–%d", part, total)
+			return nil, fieldError("pages", "pages %q are outside this pdf's 1–%d", part, total)
 		}
 		for p := first; p <= last; p++ {
 			pages = append(pages, p)
 		}
 	}
 	if len(pages) == 0 {
-		return nil, badRequest("no pages selected by %q", spec)
+		return nil, fieldError("pages", "no pages selected by %q", spec)
 	}
 	slices.Sort(pages)
 	return slices.Compact(pages), nil
