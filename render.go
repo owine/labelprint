@@ -139,10 +139,12 @@ func lastLine(s string) string {
 }
 
 // maxRenderPx caps any one raster poppler draws for us, checked before it's
-// drawn. Letter at 203 dpi is about 3.9 Mpx and Tabloid 7.7 Mpx; a box or page
-// over this would be decoded and copied in Go several times over, which a
-// 512 MB container can't take. A PDF page can be 200 in on a side.
-const maxRenderPx = 40_000_000
+// drawn. Letter at 203 dpi is about 3.9 Mpx and Tabloid 7.7 Mpx. Go holds about
+// 6 bytes a pixel while a render is decoded, thresholded and cut (232 MB
+// measured at 40 Mpx), and two requests can render at once, so 16 Mpx keeps
+// both, plus the two pdftoppm children, well inside a 512 MB container. A PDF
+// page can be 200 in on a side; at 203 dpi this allows about 19.7 in square.
+const maxRenderPx = 16_000_000
 
 // checkRender refuses a w × h pixel render of page that's over maxRenderPx.
 // Previews, detection, labels and path A's check render all come through it.

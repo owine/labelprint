@@ -87,6 +87,8 @@ page. labelprint finds the label-sized blocks on each page and prints each as it
 - **Printing finds the labels again.** If that fails at print time (an overloaded host, say), nothing is sent and
   the page says so: try again, or choose whole page. Falling back would print whole pages the preview didn't show.
 - **Known limit.** A label-sized block of instructions can't be told from a label, and appears as an extra box.
+- **Large-format pages are refused.** A page or box that would be over 16 megapixels at `RENDER_DPI` (about
+  19.7 in square at 203 dpi; Tabloid is well inside) gets "too large to print as a label", to keep memory bounded.
 
 ## Feeding and calibrating
 
