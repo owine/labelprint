@@ -100,3 +100,143 @@ func TestRenderLabelShrinksToFit(t *testing.T) {
 	}
 	assertPureLabel(t, g, canvas46)
 }
+
+var opts46 = func() labelOpts {
+	m, _ := mediaSize("na_index-4x6_4x6in")
+	return labelOpts{layout: "auto", media: m, known: true, canvas: canvas46}
+}()
+
+func wantBoxIn(t *testing.T, doc *pdfDoc, page int, got box, x, y, w, h float64) {
+	t.Helper()
+	pw, ph := doc.geom(page).inches()
+	// ±0.15 in: boxes carry ~0.04 in of padding a side (see Refinement 5)
+	const tol = 0.15
+	if !near(got.X*pw, x, tol) || !near(got.Y*ph, y, tol) || !near(got.W*pw, w, tol) || !near(got.H*ph, h, tol) {
+		t.Errorf("box at %.2f,%.2f %.2fx%.2f in, want %.2f,%.2f %.2fx%.2f",
+			got.X*pw, got.Y*ph, got.W*pw, got.H*ph, x, y, w, h)
+	}
+}
+
+func TestPlanFixtures(t *testing.T) {
+	ctx := context.Background()
+	type want struct{ x, y, w, h float64 }
+	cases := []struct {
+		name     string
+		pdf      []byte
+		boxes    []want
+		fallback bool
+	}{
+		{"1 label beside text", fixLabelBesideText(), []want{{0.75, 1.25, 4, 6}}, false},
+		{"3 hairline", fixHairline(), []want{{2.25, 2.5, 4, 6}}, false},
+		{"4 two-up", fix2up(), []want{{1.25, 0.75, 6, 4}, {1.25, 5.75, 6, 4}}, false},
+		{"6 text only", fixTextOnly(), nil, true},
+		{"8 return, blank tab", fixReturn(0, 206, 196), []want{{0.5, 4.5, 5.83, 4.08}}, false},
+		{"13 vector band", fixBand(), []want{{0.95, 1, 6.6, 4}}, false},
+		// a 4 pt border stroked at 12 pt: ink from 10 pt (0.14 in), then 0.04 in padding
+		{"existing 4x6 fixture", makeLabelPDF(1), []want{{0.1, 0.1, 3.8, 5.8}}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			doc := openTest(t, c.pdf)
+			pl := doc.plan(ctx, []int{1}, opts46)[0]
+			if !pl.Auto || pl.Fallback != c.fallback {
+				t.Fatalf("auto %v fallback %v", pl.Auto, pl.Fallback)
+			}
+			if c.fallback {
+				return
+			}
+			if len(pl.Boxes) != len(c.boxes) {
+				t.Fatalf("%d boxes, want %d", len(pl.Boxes), len(c.boxes))
+			}
+			for i, w := range c.boxes {
+				wantBoxIn(t, doc, 1, pl.Boxes[i], w.x, w.y, w.w, w.h)
+			}
+			if pl.Tabs != nil {
+				t.Errorf("unexpected tabs %v", pl.Tabs)
+			}
+		})
+	}
+}
+
+func TestPlanDocTabs(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		name       string
+		pdf        []byte
+		ppiX, ppiY float64
+		tabEnd     int
+	}{
+		{"11 retail return", fixReturn(1340, 206, 196), 206, 196, 1340},
+		{"12 at 193 ppi", fixReturn(1395, 193, 193), 193, 193, 1395},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			doc := openTest(t, c.pdf)
+			pl := doc.plan(ctx, []int{1}, opts46)[0]
+			if len(pl.Boxes) != 1 || len(pl.Tabs) != 1 || pl.Tabs[0] == nil {
+				t.Fatalf("boxes %v tabs %v", pl.Boxes, pl.Tabs)
+			}
+			// the label is the image's first 1202 px; the tab's bars run from x 1240 to tabEnd, y 200–600
+			wantBoxIn(t, doc, 1, pl.Boxes[0], 0.5, 4.5, 1202/c.ppiX, 800/c.ppiY)
+			wantBoxIn(t, doc, 1, *pl.Tabs[0], 0.5+1240/c.ppiX, 4.5+200/c.ppiY, float64(c.tabEnd-1240)/c.ppiX, 400/c.ppiY)
+			l, err := doc.label(ctx, 1, pl.Boxes[0], opts46)
+			if err != nil || l.Method != "native" {
+				t.Fatalf("label: %v %s", err, l.Method)
+			}
+
+			// "print separately": the tab grown to 0.5 in, as the page does, is its own native label
+			pw, _ := doc.geom(1).inches()
+			tab := *pl.Tabs[0]
+			if tab.W*pw < 0.5 {
+				tab.X -= (0.5/pw - tab.W) / 2
+				tab.W = 0.5 / pw
+			}
+			if l, err := doc.label(ctx, 1, tab, opts46); err != nil || l.Method != "native" {
+				t.Fatalf("separate tab: %v %s", err, l.Method)
+			}
+			// "include": label and tab together don't fit 4×6 unscaled, so they're rendered
+			inc := box{X: pl.Boxes[0].X, Y: pl.Boxes[0].Y, W: tab.X + tab.W - pl.Boxes[0].X, H: pl.Boxes[0].H}
+			if l, err := doc.label(ctx, 1, inc, opts46); err != nil || l.Method != "render" {
+				t.Fatalf("include: %v %s", err, l.Method)
+			}
+		})
+	}
+}
+
+func TestPlanOverrides(t *testing.T) {
+	ctx := context.Background()
+	doc := openTest(t, makeLabelPDF(2))
+	o := opts46
+	o.crops = map[int][]box{1: {{0, 0, 0.5, 0.5}}}
+	pl := doc.plan(ctx, []int{1, 2}, o)
+	if pl[0].Auto || len(pl[0].Boxes) != 1 || pl[0].Boxes[0] != (box{0, 0, 0.5, 0.5}) {
+		t.Errorf("crops must win: %+v", pl[0])
+	}
+	if !pl[1].Auto {
+		t.Errorf("page 2 has no crops: it's detected")
+	}
+	o = opts46
+	o.layout = "page"
+	if pl := doc.plan(ctx, []int{1}, o); pl[0].Auto || pl[0].Boxes[0] != (box{0, 0, 1, 1}) {
+		t.Errorf("layout=page: %+v", pl[0])
+	}
+}
+
+func TestLabelMethods(t *testing.T) {
+	ctx := context.Background()
+	doc := openTest(t, fixUPS2up(true, 200))
+	for _, b := range doc.plan(ctx, []int{1}, opts46)[0].Boxes {
+		l, err := doc.label(ctx, 1, b, opts46)
+		if err != nil || l.Method != "native" {
+			t.Fatalf("%v %s", err, l.Method)
+		}
+		img, _ := decodePNGBytes(l.PNG)
+		g := toGray(img)
+		assertPureLabel(t, g, canvas46)
+		assertSourcePixels(t, g, labelBitmap(800, 1200), 6, 9)
+	}
+	doc = openTest(t, fixBand())
+	b := doc.plan(ctx, []int{1}, opts46)[0].Boxes[0]
+	if l, err := doc.label(ctx, 1, b, opts46); err != nil || l.Method != "render" {
+		t.Fatalf("vector label: %v %s", err, l.Method)
+	}
+}
