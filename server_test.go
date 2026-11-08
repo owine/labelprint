@@ -187,7 +187,7 @@ func opAttr(m *ippMessage, name string) *ippAttr  { return m.group(tagOperationG
 
 func requirePoppler(t *testing.T) {
 	t.Helper()
-	for _, tool := range []string{"pdfinfo", "pdftoppm"} {
+	for _, tool := range []string{"pdfinfo", "pdftoppm", "pdfimages", "pdftohtml"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("%s not installed (poppler-utils)", tool)
 		}
