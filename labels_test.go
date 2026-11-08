@@ -78,9 +78,13 @@ func TestRenderPages(t *testing.T) {
 func TestRenderLabelTurnsLandscapeLabels(t *testing.T) {
 	doc := openTest(t, fix2up())
 	// the top 6 × 4 in label, with a little margin
-	g, err := doc.renderLabel(context.Background(), 1, boxIn(8.5, 11, 1.2, 0.7, 6.1, 4.1), canvas46)
+	g, scale, err := doc.renderLabel(context.Background(), 1, boxIn(8.5, 11, 1.2, 0.7, 6.1, 4.1), canvas46)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// 4.1 in across onto 4 in (812 dots)
+	if !near(scale, 812/4.1/203, 0.002) {
+		t.Errorf("scale %g, want about %.3f", scale, 812/4.1/203)
 	}
 	assertPureLabel(t, g, canvas46)
 	// the corner block (top-left of the label as drawn) ends up top-right
@@ -94,11 +98,53 @@ func TestRenderLabelTurnsLandscapeLabels(t *testing.T) {
 
 func TestRenderLabelShrinksToFit(t *testing.T) {
 	doc := openTest(t, fixWide()) // 6.25 × 4 in
-	g, err := doc.renderLabel(context.Background(), 1, box{0, 0, 1, 1}, canvas46)
+	g, scale, err := doc.renderLabel(context.Background(), 1, box{0, 0, 1, 1}, canvas46)
 	if err != nil {
 		t.Fatal(err)
 	}
 	assertPureLabel(t, g, canvas46)
+	// 6.25 in onto 6 in (1218 dots): 1218 / 6.25 / 203
+	if !near(scale, 0.96, 0.005) {
+		t.Errorf("scale %g, want about 0.96", scale)
+	}
+}
+
+func TestRenderLabelNeverEnlarges(t *testing.T) {
+	ctx := context.Background()
+	doc := openTest(t, fixSmallLabel()) // 3 × 5 in on 4 × 6 media
+	pl := doc.plan(ctx, []int{1}, opts46)[0]
+	if pl.Fallback || len(pl.Boxes) != 1 {
+		t.Fatalf("plan %+v", pl)
+	}
+	l, err := doc.label(ctx, 1, pl.Boxes[0], opts46)
+	if err != nil || l.Method != "render" {
+		t.Fatalf("%v %s", err, l.Method)
+	}
+	if l.Scale != 1 {
+		t.Errorf("scale %g: a label smaller than the media prints at true size", l.Scale)
+	}
+	img, err := decodePNGBytes(l.PNG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := toGray(img)
+	assertPureLabel(t, g, canvas46)
+	ink, ok := inkBounds(g, g.Rect, 128)
+	if !ok {
+		t.Fatal("no ink")
+	}
+	// the border's ink is 2.93 × 4.93 in: about 594 × 1000 dots at 203 dpi,
+	// where fitting the box to the canvas would make it about 700 dots wide
+	if !near(float64(ink.Dx()), 2.93*203, 10) || !near(float64(ink.Dy()), 4.93*203, 10) {
+		t.Errorf("ink is %dx%d dots, want about %.0fx%.0f", ink.Dx(), ink.Dy(), 2.93*203, 4.93*203)
+	}
+	// centred, to within the detection box's padding asymmetry
+	if l, r := ink.Min.X, canvas46.W-ink.Max.X; !near(float64(l), float64(r), 6) {
+		t.Errorf("not centred across: %d left, %d right", l, r)
+	}
+	if t0, b := ink.Min.Y, canvas46.H-ink.Max.Y; !near(float64(t0), float64(b), 6) {
+		t.Errorf("not centred down: %d top, %d bottom", t0, b)
+	}
 }
 
 var opts46 = func() labelOpts {
@@ -228,6 +274,9 @@ func TestLabelMethods(t *testing.T) {
 		l, err := doc.label(ctx, 1, b, opts46)
 		if err != nil || l.Method != "native" {
 			t.Fatalf("%v %s", err, l.Method)
+		}
+		if l.Scale != 1 {
+			t.Errorf("native scale %g: path A is always 1:1", l.Scale)
 		}
 		img, _ := decodePNGBytes(l.PNG)
 		g := toGray(img)

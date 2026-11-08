@@ -490,3 +490,11 @@ func fixLabelThenText() []byte {
 	}
 	return b.bytes()
 }
+
+// a 3 × 5 in vector label on Letter: smaller than 4 × 6 media
+func fixSmallLabel() []byte {
+	var b pdfBuilder
+	p := b.page(letter, 0)
+	p.vectorLabel(2.75, 3, 3, 5)
+	return b.bytes()
+}

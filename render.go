@@ -271,9 +271,12 @@ func (d *pdfDoc) renderBoxAt(ctx context.Context, page int, b box, dpiX, dpiY fl
 	return toGray(img), nil // poppler may write -gray as RGB
 }
 
-// renderLabel is path B: the box rendered so it fits the canvas (anti-aliasing
-// off), thresholded, turned to the canvas's orientation and centred on it.
-func (d *pdfDoc) renderLabel(ctx context.Context, page int, b box, cv canvas) (*image.Gray, error) {
+// renderLabel is path B: the box rendered at the printer's resolution, or
+// smaller if that's what it takes to fit the canvas, never larger: carriers
+// want labels at true size (anti-aliasing off), thresholded, turned to the
+// canvas's orientation and centred on it. scale is the render's size against
+// true size: 1, or below 1 when the box was shrunk to fit.
+func (d *pdfDoc) renderLabel(ctx context.Context, page int, b box, cv canvas) (g *image.Gray, scale float64, err error) {
 	pw, ph := d.geom(page).size()
 	bw, bh := b.W*pw/72, b.H*ph/72
 	dpi := float64(d.r.dpi)
@@ -281,13 +284,12 @@ func (d *pdfDoc) renderLabel(ctx context.Context, page int, b box, cv canvas) (*
 		if (bw > bh) != cv.landscape() {
 			bw, bh = bh, bw
 		}
-		dpi = min(float64(cv.W)/bw, float64(cv.H)/bh)
+		dpi = min(dpi, float64(cv.W)/bw, float64(cv.H)/bh)
 	}
-	g, err := d.renderBoxAt(ctx, page, b, dpi, dpi, false)
-	if err != nil {
-		return nil, err
+	if g, err = d.renderBoxAt(ctx, page, b, dpi, dpi, false); err != nil {
+		return nil, 0, err
 	}
-	return fitCanvas(threshold(g, 128), cv), nil
+	return fitCanvas(threshold(g, 128), cv), dpi / float64(d.r.dpi), nil
 }
 
 // fitCanvas turns a label to the canvas's orientation and centres it on a

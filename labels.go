@@ -30,6 +30,7 @@ type labelImg struct {
 	PNG    []byte
 	Method string  // "native" or "render"
 	PPI    float64 // native: the bitmap's resolution
+	Scale  float64 // against true size: 1, or below 1 when a render was shrunk to fit
 }
 
 // plan picks every page's boxes: the user's crops, the whole page, or
@@ -124,13 +125,13 @@ func (d *pdfDoc) label(ctx context.Context, page int, b box, o labelOpts) (label
 	g, ppi, reason := d.native(ctx, page, b, o.canvas)
 	if g != nil {
 		png, err := encodeGray(g)
-		return labelImg{PNG: png, Method: "native", PPI: ppi}, err
+		return labelImg{PNG: png, Method: "native", PPI: ppi, Scale: 1}, err
 	}
 	d.r.log.Debug("passthrough not used", "page", page, "reason", reason)
-	g, err := d.renderLabel(ctx, page, b, o.canvas)
+	g, scale, err := d.renderLabel(ctx, page, b, o.canvas)
 	if err != nil {
 		return labelImg{}, err
 	}
 	png, err := encodeGray(g)
-	return labelImg{PNG: png, Method: "render"}, err
+	return labelImg{PNG: png, Method: "render", Scale: scale}, err
 }
