@@ -1135,11 +1135,12 @@ function restoreCopies() {
   if (n > 1 && n <= state.maxCopies) $('copies').value = String(n);
 }
 
-// ---------------------------------------------------------------- feed a label
+// ---------------------------------------------------------------- feed a label, test label
 
 // One ordinary zpl job through lprint, so it lands in the jobs table like a
-// print. The server holds the zpl; the page only names the action. The result
-// shows as a badge in the printer status, which is already a live region.
+// print. The server holds the zpl; the page only names the action (and, for
+// the test label, the size to lay it out for). The result shows as a badge in
+// the printer status, which is already a live region.
 let feedTimer;
 function feedStatus(tone, text) {
   clearTimeout(feedTimer);
@@ -1149,30 +1150,40 @@ function feedStatus(tone, text) {
   s.hidden = !text;
 }
 
-$('feed').addEventListener('click', async () => {
-  const btn = $('feed');
-  btn.disabled = true;
-  btn.textContent = 'feeding…';
-  feedStatus('neutral', '');
-  try {
-    const r = await api('/api/printer/maintenance', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'feed' }),
-    });
-    r.jobs.forEach((j) => state.mine.add(j.id));
-    const warn = r.warnings?.length ? ` · ${r.warnings.join(', ')}` : '';
-    feedStatus('success', `feed sent · job ${r.jobs[0].id}${warn}`);
-    feedTimer = setTimeout(() => feedStatus('neutral', ''), 10000);
-  } catch (e) {
-    feedStatus('danger', `feed failed: ${e.message}`);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = 'feed a label';
-    loadJobs();
-    loadPrinter();
-  }
-});
+const printerActions = [
+  { id: 'feed', action: 'feed', busy: 'feeding…', what: 'feed' },
+  { id: 'test-label', action: 'test-label', busy: 'printing…', what: 'test label', sized: true },
+];
+for (const a of printerActions) {
+  const btn = $(a.id);
+  const idle = btn.textContent;
+  btn.addEventListener('click', async () => {
+    // one at a time: both buttons wait for this job
+    for (const o of printerActions) $(o.id).disabled = true;
+    btn.textContent = a.busy;
+    feedStatus('neutral', '');
+    try {
+      const body = { action: a.action };
+      if (a.sized && $('media').value) body.media = $('media').value;
+      const r = await api('/api/printer/maintenance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      r.jobs.forEach((j) => state.mine.add(j.id));
+      const warn = r.warnings?.length ? ` · ${r.warnings.join(', ')}` : '';
+      feedStatus('success', `${a.what} sent · job ${r.jobs[0].id}${warn}`);
+      feedTimer = setTimeout(() => feedStatus('neutral', ''), 10000);
+    } catch (e) {
+      feedStatus('danger', `${a.what} failed: ${e.message}`);
+    } finally {
+      for (const o of printerActions) $(o.id).disabled = false;
+      btn.textContent = idle;
+      loadJobs();
+      loadPrinter();
+    }
+  });
+}
 
 // ---------------------------------------------------------------- theme
 

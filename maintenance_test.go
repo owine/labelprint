@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -22,15 +23,30 @@ func postMaintenance(t *testing.T, h http.Handler, body, site string) (*httptest
 }
 
 func TestMaintenanceSendsZPLThroughLPrint(t *testing.T) {
+	testLabel4x6, err := os.ReadFile("testdata/test-label-4x6.zpl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	testLabel2x1, err := testLabelZPL(labelSize{50.8, 25.4}, 203)
+	if err != nil {
+		t.Fatal(err)
+	}
 	cases := []struct {
-		action, doc, jobName string
+		name, body, doc, jobName string
 	}{
-		{"feed", "^XA^FO0,0^GB1,1,1^FS^XZ\n", "labelprint: feed one label"},
+		{"feed", `{"action":"feed"}`, "^XA^FO0,0^GB1,1,1^FS^XZ\n", "labelprint: feed one label"},
+		// feed's one dot doesn't depend on the size
+		{"feed with media", `{"action":"feed","media":"oe_2x1-label_2x1in"}`, "^XA^FO0,0^GB1,1,1^FS^XZ\n", "labelprint: feed one label"},
+		{"test-label", `{"action":"test-label","media":"na_index-4x6_4x6in"}`, string(testLabel4x6), "labelprint: test label"},
+		{"test-label default media", `{"action":"test-label"}`, string(testLabel4x6), "labelprint: test label"},
+		{"test-label 2x1", `{"action":"test-label","media":"oe_2x1-label_2x1in"}`, testLabel2x1, "labelprint: test label"},
+		// a name that isn't self-describing: laid out for the default size
+		{"test-label unknown size", `{"action":"test-label","media":"custom"}`, string(testLabel4x6), "labelprint: test label"},
 	}
 	for _, c := range cases {
-		t.Run(c.action, func(t *testing.T) {
+		t.Run(c.name, func(t *testing.T) {
 			fake, h := newTestServer(t)
-			rec, out := postMaintenance(t, h, `{"action":"`+c.action+`"}`, "same-origin")
+			rec, out := postMaintenance(t, h, c.body, "same-origin")
 			if rec.Code != 200 {
 				t.Fatalf("status %d: %s", rec.Code, rec.Body)
 			}
@@ -75,6 +91,11 @@ func TestMaintenanceRejectsAnythingElse(t *testing.T) {
 		`{"action":"` + strings.Repeat("x", 4096) + `"}`,
 		`{"action":"feed"}{"action":"feed"}`, // one request, one value: no trailing JSON
 		`{"action":"feed"} garbage`,
+		`{"action":"test-label","zpl":"^XA^FDsneaky^FS^XZ"}`,
+		`{"action":"test-label","media":"../../etc"}`,              // not a media keyword
+		`{"action":"test-label","media":"oe_1x0.5-label_1x0.5in"}`, // too small for any of it
+		`{"action":"test-label","media":5}`,
+		`{"action":"testlabel"}`,
 	} {
 		t.Run(body[:min(len(body), 24)], func(t *testing.T) {
 			fake, h := newTestServer(t)

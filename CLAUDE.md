@@ -26,7 +26,8 @@ example stack. The repo is public: keep real hostnames, addresses and deployment
 | `zpl.go` | ZPL preview via zebrash (the only module dependency, `github.com/Gobbo89/zebrash`): panic recovery, timeout, canvas from `^PW`/`^LL` or the media |
 | `media.go` | turns LPrint's `media-supported` PWG names into dropdown labels and sizes |
 | `server.go` | HTTP handlers, upload limits, the print flow, cross-origin protection, security headers |
-| `maintenance.go` | `POST /api/printer/maintenance`: "feed a label" as a ZPL job (a one-dot box). No remote calibrate: that's SmartCal at the printer |
+| `maintenance.go` | `POST /api/printer/maintenance`: "feed a label" (a one-dot box) and "test label" as ZPL jobs. No remote calibrate: that's SmartCal at the printer |
+| `testlabel.go` | the darkness/speed test label: server-side ZPL packed into the selected media, leaving out what doesn't fit; never sets `~SD`/`^MD`/`^PR` |
 | `share.go` | phone sharing: `POST /share` holds a checked upload in memory under a one-time token for the page's preview |
 | `web/` | the page: vanilla JS, owine design tokens (`tokens.css`), vendored fonts. No build step |
 | `shortcut/` | source (XML plist) of the signed iOS Shortcut served as `web/labelprint.shortcut`; see below |

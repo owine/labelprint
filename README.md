@@ -96,11 +96,27 @@ page. labelprint finds the label-sized blocks on each page and prints each as it
 - **Large-format pages are refused.** A page or box that would be over 16 megapixels at `RENDER_DPI` (about
   19.7 in square at 203 dpi; Tabloid is well inside) gets "too large to print as a label", to keep memory bounded.
 
-## Feeding and calibrating
+## Feeding, test label and calibrating
 
 **Feed a label** in the header feeds one blank label. It's sent as an ordinary ZPL job through LPrint, so it shows up
 in LPrint's job list. The ZPL is fixed on the server (a one-dot box, `^XA^FO0,0^GB1,1,1^FS^XZ`), so the endpoint
 can't be used to send arbitrary ZPL.
+
+**Test label** prints a reference for tuning darkness and speed: PDF417 with a 2-dot module, Code 128 at 2, 3 and 4
+dots, a MaxiCode, a grid of 1-dot lines and a solid block. Like feed, it's ZPL generated on the server, laid out for
+the label size picked in the page. Smaller labels leave out what doesn't fit, and a 2×1 still gets the PDF417 and
+the grid. The label sets no darkness or speed of its own (the 4×6 version is in `testdata/test-label-4x6.zpl`).
+
+To tune, set darkness and speed once in LPrint's web UI. LPrint sends them to the printer with PDF and image jobs
+only, so print a PDF or image after a change, then the test label. Then check:
+
+- the 2-dot PDF417 and the 1-dot grid are crisp, with every line there and no gaps filled in;
+- the block is solid black, with no pale streaks;
+- the Code 128 bars haven't spread into each other.
+
+Too light breaks lines and leaves the block grey; too much heat (or too much speed for the heat) spreads the bars,
+which hits the 2-dot PDF417 and the MaxiCode first. FedEx asks for at least 90% print contrast on direct-thermal
+labels, so go as dark as you can before the bars start to spread.
 
 **Calibration happens at the printer.** If it reports `media-empty` with labels loaded, use SmartCal: hold FEED until
 the light flashes twice, then let go. There's no remote calibrate on purpose. Sending `~JC` through LPrint left the
