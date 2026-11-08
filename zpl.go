@@ -87,6 +87,82 @@ func lastNumber(re *regexp.Regexp, data []byte) (int, bool) {
 
 func clamp(v, lo, hi float64) float64 { return min(max(v, lo), hi) }
 
+// largestNumber is the biggest value a command sets anywhere in the file, so
+// a file of several labels is judged by its largest.
+func largestNumber(re *regexp.Regexp, data []byte) (int, bool) {
+	best := 0
+	for _, m := range re.FindAllSubmatch(data, -1) {
+		if n, err := strconv.Atoi(string(m[1])); err == nil && n > best {
+			best = n
+		}
+	}
+	return best, best > 0
+}
+
+// fitMargin is how far ^LL may exceed the selected labels before the preview
+// warns: 2%, which absorbs the rounding in "6 in = 1218 or 1219 dots" and
+// stock that's nominally 6 in, yet is far below the 12% of a 4×6.75 doc tab
+// label or the 33% of a 4×8 one. Running across the gap is the real failure.
+//
+// ^PW gets the larger of that and fitWidthSlack: some generators set ^PW to
+// the head's full width (832 dots, 4.1 in, on a 4 in 203 dpi head) rather
+// than the label's, and that prints fine because the content stays on the
+// label. 0.12 in lets ^PW832 pass on 4 in labels (up to ~836 dots) but not on
+// 2 in ones.
+const (
+	fitMargin     = 0.02
+	fitWidthSlack = 0.12 // inches
+)
+
+// fitWarning says when the zpl's own ^PW/^LL are bigger than the selected
+// labels, so it would be cut off at the side or print across the gap onto
+// the next label. It only warns: the zpl is always sent unchanged. No
+// ^PW/^LL, or no media size, means nothing to compare.
+func (z *zplRenderer) fitWarning(data []byte, media labelSize) string {
+	if media.WidthMm <= 0 || media.HeightMm <= 0 {
+		return ""
+	}
+	dpi := float64(z.dpi)
+	mediaW, mediaH := media.WidthMm/25.4, media.HeightMm/25.4 // inches
+	pw, hasW := largestNumber(zplPrintWidth, data)
+	ll, hasL := largestNumber(zplLabelLength, data)
+	w, h := float64(pw)/dpi, float64(ll)/dpi
+	wide := hasW && w > mediaW+max(mediaW*fitMargin, fitWidthSlack)
+	long := hasL && h > mediaH*(1+fitMargin)
+	if !wide && !long {
+		return ""
+	}
+	in := func(v float64) string { return strconv.FormatFloat(round2(v), 'f', -1, 64) }
+	stock := in(mediaW) + " × " + in(mediaH) + " in"
+	labels := stock + " labels"
+	at := fmt.Sprintf(" at %d dpi", z.dpi)
+
+	// A 300 dpi label read by a 203 dpi head: ^PW comes out about 300/203
+	// times the label's width (a 4 in label's ^PW1200–1230 is 5.9–6.1 in).
+	if wide && dpi < 300*0.9 && math.Abs(w*dpi/300/mediaW-1) <= 0.05 {
+		size := in(w)
+		if hasL {
+			size += " × " + in(h)
+		}
+		return "this zpl looks made for a 300 dpi printer:" + at + " it's " + size + " in, too big for the " + labels +
+			" selected. choose " + stock + at + " in your shipping tool"
+	}
+
+	effect := map[[2]bool]string{
+		{true, false}: "it will be cut off at the edge",
+		{false, true}: "it will run onto the next label",
+		{true, true}:  "it will be cut off at the edge and run onto the next label",
+	}[[2]bool{wide, long}]
+	switch {
+	case hasW && hasL:
+		return "this zpl is " + in(w) + " × " + in(h) + " in" + at + ", bigger than the " + labels + " selected: " + effect
+	case hasW:
+		return "this zpl is " + in(w) + " in wide" + at + ", wider than the " + labels + " selected: " + effect
+	default:
+		return "this zpl is " + in(h) + " in long" + at + ", longer than the " + labels + " selected: " + effect
+	}
+}
+
 type zplPreview struct {
 	Labels int            // ^XA…^XZ formats zebrash found
 	Size   previewSize    // canvas used

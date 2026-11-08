@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -221,5 +222,74 @@ func TestPreviewZPL(t *testing.T) {
 	rec, out = post(t, h, "/api/preview", "x.zpl", []byte("^XA^FO10,10^GB50,50,50^FS^XZ"), map[string]string{"media": "oe_2x1-label_2x1in"})
 	if rec.Code != 200 || out["widthIn"] != 2.0 || out["heightIn"] != 1.0 {
 		t.Fatalf("status %d: %v", rec.Code, out)
+	}
+}
+
+func TestZPLFitWarning(t *testing.T) {
+	z := newZPLRenderer(203)
+	size2x1 := labelSize{WidthMm: 50.8, HeightMm: 25.4}
+	cases := []struct {
+		name  string
+		zpl   string
+		media labelSize
+		want  string // substring; "" means no warning
+	}{
+		{"fits", "^XA^PW812^LL1218^XZ", size4x6, ""},
+		{"within the margin", "^XA^PW828^LL1240^XZ", size4x6, ""},
+		{"head-width ^PW on 4 in labels", "^XA^PW832^LL1218^XZ", size4x6, ""},
+		{"head-width ^PW on 2 in labels", "^XA^PW832^XZ", size2x1, "this zpl is 4.1 in wide at 203 dpi, wider than the 2 × 1 in labels selected"},
+		{"just past the head-width slack", "^XA^PW850^XZ", size4x6, "this zpl is 4.19 in wide at 203 dpi, wider than the 4 × 6 in labels selected"},
+		{"nothing to compare", "^XA^FO10,10^GB50,50,50^FS^XZ", size4x6, ""},
+		{"media unknown", "^XA^PW1218^LL1800^XZ", labelSize{}, ""},
+		{"too long", "^XA^PW812^LL1624^XZ", size4x6, "this zpl is 4 × 8 in at 203 dpi, bigger than the 4 × 6 in labels selected: it will run onto the next label"},
+		{"doc tab", "^XA^PW812^LL1370^XZ", size4x6, "4 × 6.75 in at 203 dpi"},
+		{"too wide", "^XA^PW812^LL1218^XZ", size2x1, "this zpl is 4 × 6 in at 203 dpi, bigger than the 2 × 1 in labels selected: it will be cut off at the edge and run onto the next label"},
+		{"too wide, no ^LL", "^xa^pw 900^xz", size4x6, "this zpl is 4.43 in wide at 203 dpi, wider than the 4 × 6 in labels selected: it will be cut off at the edge"},
+		{"too long, no ^PW", "^XA^LL1624^XZ", size4x6, "this zpl is 8 in long at 203 dpi, longer than the 4 × 6 in labels selected: it will run onto the next label"},
+		{"300 dpi", "^XA^PW1218^LL1800^XZ", size4x6, "this zpl looks made for a 300 dpi printer: at 203 dpi it's 6 × 8.87 in, too big for the 4 × 6 in labels selected. choose 4 × 6 in at 203 dpi in your shipping tool"},
+		{"300 dpi, exact", "^XA^PW1200^XZ", size4x6, "looks made for a 300 dpi printer"},
+		{"300 dpi, small labels", "^XA^PW600^LL300^XZ", size2x1, "choose 2 × 1 in at 203 dpi"},
+		{"largest label counts", "^XA^PW812^LL1218^XZ^XA^PW812^LL1624^XZ^XA^PW400^LL400^XZ", size4x6, "4 × 8 in at 203 dpi"},
+	}
+	for _, c := range cases {
+		got := z.fitWarning([]byte(c.zpl), c.media)
+		if c.want == "" && got != "" || !strings.Contains(got, c.want) {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+	// a 300 dpi printer reads 300 dpi zpl at its true size
+	if got := newZPLRenderer(300).fitWarning([]byte("^XA^PW1218^LL1800^XZ"), size4x6); got != "" {
+		t.Errorf("300 dpi printer: %q", got)
+	}
+	if got := newZPLRenderer(300).fitWarning([]byte("^XA^PW1218^LL2400^XZ"), size4x6); !strings.Contains(got, "4.06 × 8 in at 300 dpi") {
+		t.Errorf("300 dpi printer, 4×8 zpl: %q", got)
+	}
+}
+
+func TestPreviewZPLFitWarning(t *testing.T) {
+	fake, h := newTestServer(t)
+	big := []byte("^XA^PW812^LL1624^FO10,10^GB50,50,50^FS^XZ")
+	rec, out := post(t, h, "/api/preview", "big.zpl", big, map[string]string{"media": "na_index-4x6_4x6in"})
+	if rec.Code != 200 || !strings.Contains(fmt.Sprint(out["fitWarning"]), "4 × 8 in") {
+		t.Fatalf("status %d: %v", rec.Code, out["fitWarning"])
+	}
+	// still drawn at its own size, and still printed unchanged
+	if out["widthIn"] != 4.0 || out["heightIn"] != 8.0 || out["previewError"] != nil {
+		t.Fatalf("got %v × %v, %v", out["widthIn"], out["heightIn"], out["previewError"])
+	}
+	rec, _ = post(t, h, "/api/print", "big.zpl", big, map[string]string{"media": "na_index-4x6_4x6in"})
+	if rec.Code != 200 || len(fake.printJobs()) != 1 || !bytes.Equal(fake.printJobs()[0].Data, big) {
+		t.Fatalf("print: status %d", rec.Code)
+	}
+	// the warning doesn't need a picture: it's there when zebrash gives up too
+	bad := []byte("^XA^PW1218^LL1800^FO40,40^BD2^FD001840000000000000[)>_1E01_1D96X_1D_1E_04^FS^XZ")
+	_, out = post(t, h, "/api/preview", "bad.zpl", bad, nil) // no media: the default, 4×6
+	if out["previewError"] == nil || !strings.Contains(fmt.Sprint(out["fitWarning"]), "300 dpi") {
+		t.Fatalf("got %v", out)
+	}
+	// fits: no field at all
+	_, out = post(t, h, "/api/preview", "ok.zpl", []byte("^XA^PW812^LL1218^XZ"), map[string]string{"media": "na_index-4x6_4x6in"})
+	if _, ok := out["fitWarning"]; ok {
+		t.Fatalf("fitWarning on a label that fits: %v", out["fitWarning"])
 	}
 }
