@@ -18,11 +18,9 @@ import (
 	"time"
 )
 
-// pdfRenderer rasterises PDFs with poppler. Each page becomes an 8-bit
-// grayscale PNG at the printer's resolution, which LPrint then dithers to the
-// GX420t's 1-bit head. Anti-aliasing is off: smoothed edges would come out of
-// that dither as fuzzy barcode bars, while hard edges at 203 dpi map 1:1 to
-// printer dots.
+// pdfRenderer rasterises PDFs with poppler. Labels come out pure black/white
+// at the printer's dots (see labels.go); anti-aliasing is off for them, since
+// smoothed edges would be dithered into fuzzy barcode bars.
 type pdfRenderer struct {
 	dpi     int
 	timeout time.Duration // per poppler invocation
@@ -103,33 +101,6 @@ func (r *pdfRenderer) open(ctx context.Context, data []byte) (*pdfDoc, error) {
 }
 
 func (d *pdfDoc) Close() { _ = os.RemoveAll(d.dir) }
-
-// render rasterises the given 1-based pages. Pages go one poppler call each
-// (-singlefile gives a predictable output name); for label PDFs the re-parse
-// per call costs milliseconds.
-func (d *pdfDoc) render(ctx context.Context, pages []int) ([]renderedPage, error) {
-	out := make([]renderedPage, 0, len(pages))
-	for _, p := range pages {
-		base := filepath.Join(d.dir, "page-"+strconv.Itoa(p))
-		n := strconv.Itoa(p)
-		_, err := d.r.run(ctx, "pdftoppm",
-			"-png", "-gray", "-r", strconv.Itoa(d.r.dpi),
-			"-aa", "no", "-aaVector", "no",
-			"-cropbox", // the box viewers show, not the (sometimes larger) media box
-			"-f", n, "-l", n, "-singlefile",
-			d.path, base)
-		if err != nil {
-			return nil, fmt.Errorf("rendering page %d: %w", p, err)
-		}
-		png, err := os.ReadFile(base + ".png")
-		if err != nil {
-			return nil, fmt.Errorf("rendering page %d: %w", p, err)
-		}
-		_ = os.Remove(base + ".png")
-		out = append(out, renderedPage{Page: p, PNG: png})
-	}
-	return out, nil
-}
 
 // run executes a poppler tool and folds its stderr into the error.
 func (r *pdfRenderer) run(ctx context.Context, name string, args ...string) ([]byte, error) {

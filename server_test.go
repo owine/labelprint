@@ -287,6 +287,11 @@ func TestPrintPDFOneJobPerPage(t *testing.T) {
 		if b := img.Bounds(); b.Dx() != 812 || b.Dy() != 1218 {
 			t.Errorf("page %d is %dx%d, want 812x1218", i, b.Dx(), b.Dy())
 		}
+		for _, v := range toGray(img).Pix {
+			if v != 0 && v != 255 {
+				t.Fatalf("page %d has gray pixels", i)
+			}
+		}
 	}
 	if n := len(out["jobs"].([]any)); n != 2 {
 		t.Errorf("response lists %d jobs", n)
@@ -401,20 +406,92 @@ func TestPreviewPDF(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
-	if out["kind"] != "pdf" || out["pageCount"] != 2.0 || out["selected"] != 2.0 {
+	if out["kind"] != "pdf" || out["pageCount"] != 2.0 || out["selected"] != 2.0 || out["labels"] != 2.0 {
 		t.Fatalf("got %v", out)
 	}
+	if out["widthIn"] != 4.0 || out["heightIn"] != 6.0 {
+		t.Errorf("media size %v × %v", out["widthIn"], out["heightIn"])
+	}
 	pages := out["pages"].([]any)
-	if len(pages) != 2 || !strings.HasPrefix(pages[0].(map[string]any)["image"].(string), "data:image/png;base64,") {
-		t.Fatalf("pages = %v", pages)
+	p := pages[0].(map[string]any)
+	if len(pages) != 2 || !strings.HasPrefix(p["image"].(string), "data:image/png;base64,") ||
+		p["auto"] != true || p["widthIn"] != 4.0 || len(p["boxes"].([]any)) != 1 {
+		t.Fatalf("page = %v", p)
+	}
+	li := p["labelImages"].([]any)[0].(map[string]any)
+	if li["method"] != "render" || !strings.HasPrefix(li["image"].(string), "data:image/png;base64,") {
+		t.Fatalf("label image = %v", li)
 	}
 	if len(fake.printJobs()) != 0 {
 		t.Fatal("preview printed")
 	}
 
 	rec, out = post(t, h, "/api/preview", "x.pdf", makeLabelPDF(2), map[string]string{"pages": "3"})
-	if rec.Code != 400 || !strings.Contains(out["error"].(string), "outside") {
+	if rec.Code != 400 || !strings.Contains(out["error"].(string), "outside") || out["field"] != "pages" {
 		t.Fatalf("bad range: status %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestPreviewNativeAndCrops(t *testing.T) {
+	requirePoppler(t)
+	_, h := newTestServer(t)
+	rec, out := post(t, h, "/api/preview", "ups.pdf", fixUPS2up(true, 200), nil) // no media: default applies
+	if rec.Code != 200 || out["labels"] != 2.0 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	for _, li := range out["pages"].([]any)[0].(map[string]any)["labelImages"].([]any) {
+		if m := li.(map[string]any); m["method"] != "native" || m["ppi"] != 200.0 {
+			t.Errorf("label %v", m)
+		}
+	}
+
+	// 8 boxes written to 6 decimals is over 300 bytes: past the old 256-byte field cap
+	var boxes []string
+	for i := range 8 {
+		boxes = append(boxes, fmt.Sprintf("[%.6f, 0.100000, 0.125000, 0.200000]", float64(i)*0.1))
+	}
+	if n := len(strings.Join(boxes, ",")); n <= 300 {
+		t.Fatalf("crops is only %d bytes; the test needs more than 256", n)
+	}
+	crops := `{"1": [` + strings.Join(boxes, ",") + `]}`
+	rec, out = post(t, h, "/api/preview", "x.pdf", makeLabelPDF(2), map[string]string{"crops": crops})
+	if rec.Code != 200 || out["labels"] != 9.0 {
+		t.Fatalf("crops: status %d labels %v: %s", rec.Code, out["labels"], rec.Body)
+	}
+	if p := out["pages"].([]any)[0].(map[string]any); p["auto"] == true || len(p["boxes"].([]any)) != 8 {
+		t.Errorf("page 1 should use the crops: %v", p["boxes"])
+	}
+
+	rec, out = post(t, h, "/api/preview", "x.pdf", makeLabelPDF(1), map[string]string{"crops": `{"1": [[0,0,0.01,0.01]]}`})
+	if rec.Code != 400 || out["field"] != "crops" {
+		t.Fatalf("bad crops: status %d: %s", rec.Code, rec.Body)
+	}
+
+	rec, out = post(t, h, "/api/preview", "x.pdf", makeLabelPDF(1), map[string]string{"layout": "page"})
+	b := out["pages"].([]any)[0].(map[string]any)["boxes"].([]any)[0].([]any)
+	if rec.Code != 200 || b[0] != 0.0 || b[2] != 1.0 {
+		t.Fatalf("layout=page: %v", b)
+	}
+}
+
+func TestPrintPDFNamesEachLabel(t *testing.T) {
+	requirePoppler(t)
+	fake, h := newTestServer(t)
+	rec, _ := post(t, h, "/api/print", "two.pdf", fix2up(), map[string]string{"copies": "3"})
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	jobs := fake.printJobs()
+	if len(jobs) != 2 {
+		t.Fatalf("%d jobs", len(jobs))
+	}
+	for i, want := range []string{"two.pdf · label 1/2", "two.pdf · label 2/2"} {
+		if got := opAttr(jobs[i], "job-name").str(); got != want {
+			t.Errorf("job-name = %q, want %q", got, want)
+		}
+		if got := jobAttr(jobs[i], "copies").int(); got != 3 {
+			t.Errorf("copies = %d", got)
+		}
 	}
 }
 

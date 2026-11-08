@@ -494,6 +494,7 @@ type printRequest struct {
 	Copies  int
 	Scaling string // print-scaling keyword; empty = printer default
 	Data    []byte
+	Note    string // for labelprint's own log only (pdf labels: "native" or "render"); never sent
 }
 
 type jobInfo struct {

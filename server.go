@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"path"
@@ -278,23 +279,42 @@ func cleanFilename(name string) string {
 type previewPage struct {
 	Page  int    `json:"page"`
 	Image string `json:"image"` // data: URL
+	// pdf only
+	WidthIn     float64        `json:"widthIn,omitempty"` // the page as displayed
+	HeightIn    float64        `json:"heightIn,omitempty"`
+	Auto        bool           `json:"auto,omitempty"`
+	Fallback    bool           `json:"fallback,omitempty"`
+	Boxes       []box          `json:"boxes,omitempty"`
+	Tabs        []*box         `json:"tabs,omitempty"`
+	LabelImages []previewLabel `json:"labelImages,omitempty"`
 }
+
+type previewLabel struct {
+	Image  string `json:"image"`  // exactly what LPrint will receive
+	Method string `json:"method"` // native or render
+	PPI    int    `json:"ppi,omitempty"`
+}
+
+const (
+	maxPreviewPages  = 12
+	maxPreviewLabels = 12
+	previewDPI       = 96
+)
 
 type previewResponse struct {
 	Kind      docKind       `json:"kind"`
 	PageCount int           `json:"pageCount,omitempty"` // pages in the pdf
 	Selected  int           `json:"selected,omitempty"`  // pages the range picks
 	Pages     []previewPage `json:"pages,omitempty"`     // first maxPreviewPages of those
-	Labels    int           `json:"labels,omitempty"`    // labels in the zpl
-	// zpl only: the canvas the preview was drawn on, and why there's no
-	// picture if zebrash couldn't draw one. A failed preview never blocks
-	// printing: the printer interprets the zpl itself.
-	WidthIn      float64 `json:"widthIn,omitempty"`
-	HeightIn     float64 `json:"heightIn,omitempty"`
-	PreviewError string  `json:"previewError,omitempty"`
+	Labels    int           `json:"labels,omitempty"`    // labels in the zpl, or label boxes across the pdf's selected pages
+	// The canvas the labels were drawn on (zpl, and pdf when the media size
+	// is known).
+	WidthIn  float64 `json:"widthIn,omitempty"`
+	HeightIn float64 `json:"heightIn,omitempty"`
+	// zpl only: why there's no picture if zebrash couldn't draw one. A failed
+	// preview never blocks printing: the printer interprets the zpl itself.
+	PreviewError string `json:"previewError,omitempty"`
 }
-
-const maxPreviewPages = 12
 
 func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	up, err := s.readUpload(w, r)
@@ -323,28 +343,10 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		resp.WidthIn, resp.HeightIn = p.Size.WidthIn, p.Size.HeightIn
 		resp.Pages = dataURLs(p.Pages)
 	case kindPDF:
-		doc, err := s.pdf.open(r.Context(), up.Data)
-		if err != nil {
+		if err := s.previewPDF(r.Context(), up, &resp); err != nil {
 			s.fail(w, err)
 			return
 		}
-		defer doc.Close()
-		pages, err := parsePageRange(up.Fields["pages"], doc.Pages)
-		if err != nil {
-			s.fail(w, err)
-			return
-		}
-		if len(pages) > s.cfg.MaxPages {
-			s.fail(w, tooManyPages(len(pages), s.cfg.MaxPages))
-			return
-		}
-		resp.PageCount, resp.Selected = doc.Pages, len(pages)
-		rendered, err := doc.render(r.Context(), pages[:min(len(pages), maxPreviewPages)])
-		if err != nil {
-			s.fail(w, &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()})
-			return
-		}
-		resp.Pages = dataURLs(rendered)
 	}
 	// PNG/JPEG: the browser already has the bytes and shows them itself.
 	writeJSON(w, http.StatusOK, resp)
@@ -353,9 +355,123 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 func dataURLs(pages []renderedPage) []previewPage {
 	out := make([]previewPage, 0, len(pages))
 	for _, p := range pages {
-		out = append(out, previewPage{Page: p.Page, Image: "data:image/png;base64," + base64.StdEncoding.EncodeToString(p.PNG)})
+		out = append(out, previewPage{Page: p.Page, Image: dataURL(p.PNG)})
 	}
 	return out
+}
+
+func dataURL(png []byte) string {
+	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(png)
+}
+
+// mediaFor is the label size to detect and draw for: the chosen media, or the
+// default when it's missing or has no size in its name.
+func (s *server) mediaFor(name string) (labelSize, bool) {
+	if m, ok := mediaSize(name); ok {
+		return m, true
+	}
+	return mediaSize(s.cfg.DefaultMedia)
+}
+
+func (s *server) labelOpts(fields map[string]string, doc *pdfDoc, pages []int, mediaName string) (labelOpts, error) {
+	layout, err := parseLayout(fields["layout"])
+	if err != nil {
+		return labelOpts{}, err
+	}
+	crops, err := parseCrops(fields["crops"], pages, func(p int) (float64, float64) { return doc.geom(p).inches() })
+	if err != nil {
+		return labelOpts{}, err
+	}
+	media, ok := s.mediaFor(mediaName)
+	return labelOpts{layout: layout, crops: crops, media: media, known: ok, canvas: canvasFor(media, ok, s.cfg.DPI)}, nil
+}
+
+// openPDF opens the upload and checks its page range against MAX_PAGES,
+// before anything is rendered.
+func (s *server) openPDF(ctx context.Context, up *upload) (*pdfDoc, []int, error) {
+	doc, err := s.pdf.open(ctx, up.Data)
+	if err != nil {
+		return nil, nil, err
+	}
+	pages, err := parsePageRange(up.Fields["pages"], doc.Pages)
+	if err == nil && len(pages) > s.cfg.MaxPages {
+		err = tooManyPages(len(pages), s.cfg.MaxPages)
+	}
+	if err != nil {
+		doc.Close()
+		return nil, nil, err
+	}
+	return doc, pages, nil
+}
+
+// previewPDF fills in a pdf's pages, their label boxes and, for the first
+// maxPreviewLabels boxes, the label images exactly as they'd be sent.
+// Detection runs on every selected page so labels is the full count; pages
+// and label images are capped.
+func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewResponse) error {
+	release, err := s.pdf.acquire(ctx) // held for every poppler call, pdfinfo included
+	if err != nil {
+		return err
+	}
+	defer release()
+	doc, pages, err := s.openPDF(ctx, up)
+	if err != nil {
+		return err
+	}
+	defer doc.Close()
+	o, err := s.labelOpts(up.Fields, doc, pages, up.Fields["media"])
+	if err != nil {
+		return err
+	}
+
+	resp.PageCount, resp.Selected = doc.Pages, len(pages)
+	if o.known {
+		resp.WidthIn, resp.HeightIn = round2(o.media.WidthMm/25.4), round2(o.media.HeightMm/25.4)
+	}
+	plans := doc.plan(ctx, pages, o)
+	for _, pl := range plans {
+		resp.Labels += len(pl.Boxes)
+	}
+	shown := plans[:min(len(plans), maxPreviewPages)]
+	shownPages := make([]int, len(shown))
+	for i, pl := range shown {
+		shownPages[i] = pl.Page
+	}
+	images, err := doc.renderPages(ctx, shownPages, previewDPI, true)
+	if err != nil {
+		return &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
+	}
+	budget := maxPreviewLabels
+	for _, pl := range shown {
+		pw, ph := doc.geom(pl.Page).inches()
+		pp := previewPage{Page: pl.Page, Image: dataURL(images[pl.Page]), WidthIn: round2(pw), HeightIn: round2(ph),
+			Auto: pl.Auto, Fallback: pl.Fallback, Boxes: pl.Boxes, Tabs: pl.Tabs}
+		for _, b := range pl.Boxes {
+			if budget == 0 {
+				break
+			}
+			l, err := doc.label(ctx, pl.Page, b, o)
+			if err != nil {
+				return &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
+			}
+			pp.LabelImages = append(pp.LabelImages, previewLabel{Image: dataURL(l.PNG), Method: l.Method,
+				PPI: int(math.Round(l.PPI))})
+			budget--
+		}
+		resp.Pages = append(resp.Pages, pp)
+	}
+	return nil
+}
+
+func pdfJobName(file string, page, pages, i, n int) string {
+	name := file
+	if pages > 1 {
+		name += fmt.Sprintf(" · p%d/%d", page, pages)
+	}
+	if n > 1 {
+		name += fmt.Sprintf(" · label %d/%d", i+1, n)
+	}
+	return name
 }
 
 // ---------------------------------------------------------------- print
@@ -412,8 +528,14 @@ func (s *server) handlePrint(w http.ResponseWriter, r *http.Request) {
 	for i, j := range resp.Jobs {
 		ids[i] = j.ID
 	}
+	notes := make([]string, 0, len(reqs))
+	for _, pr := range reqs {
+		if pr.Note != "" {
+			notes = append(notes, pr.Note)
+		}
+	}
 	s.log.Info("print", "kind", up.Kind, "bytes", len(up.Data), "copies", copies, "media", media,
-		"jobs", ids, "error", errString(sendErr))
+		"labels", len(reqs), "methods", notes, "jobs", ids, "error", errString(sendErr))
 
 	if sendErr != nil {
 		if len(resp.Jobs) > 0 {
@@ -460,32 +582,34 @@ func (s *server) buildJobs(ctx context.Context, up *upload, copies int, media, u
 		return []printRequest{base}, nil
 
 	case kindPDF:
-		doc, err := s.pdf.open(ctx, up.Data)
+		release, err := s.pdf.acquire(ctx) // held for every poppler call, pdfinfo included
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		doc, pages, err := s.openPDF(ctx, up)
 		if err != nil {
 			return nil, err
 		}
 		defer doc.Close()
-		pages, err := parsePageRange(up.Fields["pages"], doc.Pages)
+		o, err := s.labelOpts(up.Fields, doc, pages, media)
 		if err != nil {
 			return nil, err
 		}
-		if len(pages) > s.cfg.MaxPages {
-			return nil, tooManyPages(len(pages), s.cfg.MaxPages)
-		}
-		rendered, err := doc.render(ctx, pages)
-		if err != nil {
-			return nil, &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
-		}
-		// One job per page: LPrint takes a single document per job
+		// One job per label: LPrint takes a single document per job
 		// (multiple-document-jobs-supported = false).
-		out := make([]printRequest, 0, len(rendered))
-		for _, p := range rendered {
-			pr := base
-			pr.Format, pr.Scaling, pr.Data = kindPNG.mimeType(), "fit", p.PNG
-			if doc.Pages > 1 {
-				pr.JobName = fmt.Sprintf("%s · p%d/%d", up.Filename, p.Page, doc.Pages)
+		var out []printRequest
+		for _, pl := range doc.plan(ctx, pages, o) {
+			for i, b := range pl.Boxes {
+				l, err := doc.label(ctx, pl.Page, b, o)
+				if err != nil {
+					return nil, &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
+				}
+				pr := base
+				pr.Format, pr.Scaling, pr.Data, pr.Note = kindPNG.mimeType(), "fit", l.PNG, l.Method
+				pr.JobName = pdfJobName(up.Filename, pl.Page, doc.Pages, i, len(pl.Boxes))
+				out = append(out, pr)
 			}
-			out = append(out, pr)
 		}
 		return out, nil
 	}
