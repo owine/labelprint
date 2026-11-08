@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"os"
 	"testing"
 )
@@ -95,3 +96,5 @@ func (b *ippResponseBuilder) mustBytes(t testing.TB) []byte {
 	}
 	return out
 }
+
+var discardLog = slog.New(slog.DiscardHandler)

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,12 +23,26 @@ import (
 type pdfRenderer struct {
 	dpi     int
 	timeout time.Duration // per poppler invocation
-	slots   chan struct{} // caps concurrent renders on a small Pi
+	slots   chan struct{} // caps concurrent pipelines on a small Pi
+	log     *slog.Logger
 }
 
-func newPDFRenderer(dpi int) *pdfRenderer {
-	return &pdfRenderer{dpi: dpi, timeout: 60 * time.Second, slots: make(chan struct{}, 2)}
+func newPDFRenderer(dpi int, log *slog.Logger) *pdfRenderer {
+	return &pdfRenderer{dpi: dpi, timeout: 60 * time.Second, slots: make(chan struct{}, 2), log: log}
 }
+
+// acquire takes one of the two pipeline slots: everything one request does
+// with a PDF runs inside it.
+func (r *pdfRenderer) acquire(ctx context.Context) (release func(), err error) {
+	select {
+	case r.slots <- struct{}{}:
+		return func() { <-r.slots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+type pageImage struct{} // replaced in native.go (Task 7)
 
 // renderedPage is one page's PNG, in page order.
 type renderedPage struct {
@@ -38,18 +53,23 @@ type renderedPage struct {
 // pdfDoc is a PDF written to scratch space (the tmpfs at /tmp in the
 // container) for poppler to read. Close removes it.
 type pdfDoc struct {
-	r     *pdfRenderer
-	dir   string
-	path  string
-	Pages int
+	r      *pdfRenderer
+	dir    string
+	path   string
+	Pages  int
+	geoms  []pageGeom          // per page, index page-1
+	images map[int][]pageImage // per page, filled on first need (native.go)
+	seq    int                 // names scratch files
 }
+
+func (d *pdfDoc) geom(page int) pageGeom { return d.geoms[page-1] }
 
 func (r *pdfRenderer) open(ctx context.Context, data []byte) (*pdfDoc, error) {
 	dir, err := os.MkdirTemp("", "labelprint-*")
 	if err != nil {
 		return nil, fmt.Errorf("scratch space: %w", err)
 	}
-	d := &pdfDoc{r: r, dir: dir, path: filepath.Join(dir, "in.pdf")}
+	d := &pdfDoc{r: r, dir: dir, path: filepath.Join(dir, "in.pdf"), images: map[int][]pageImage{}}
 	if err := os.WriteFile(d.path, data, 0o600); err != nil {
 		d.Close()
 		return nil, fmt.Errorf("scratch space: %w", err)
@@ -69,6 +89,15 @@ func (r *pdfRenderer) open(ctx context.Context, data []byte) (*pdfDoc, error) {
 		d.Close()
 		return nil, badRequest("that pdf has no pages")
 	}
+	out, err = r.run(ctx, "pdfinfo", "-box", "-f", "1", "-l", strconv.Itoa(d.Pages), d.path)
+	if err != nil {
+		d.Close()
+		return nil, badRequest("couldn't read that pdf: %s", err)
+	}
+	if d.geoms, err = parsePageGeoms(out, d.Pages); err != nil {
+		d.Close()
+		return nil, badRequest("couldn't read that pdf's page sizes: %s", err)
+	}
 	return d, nil
 }
 
@@ -78,12 +107,6 @@ func (d *pdfDoc) Close() { _ = os.RemoveAll(d.dir) }
 // (-singlefile gives a predictable output name); for label PDFs the re-parse
 // per call costs milliseconds.
 func (d *pdfDoc) render(ctx context.Context, pages []int) ([]renderedPage, error) {
-	select {
-	case d.r.slots <- struct{}{}:
-		defer func() { <-d.r.slots }()
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
 	out := make([]renderedPage, 0, len(pages))
 	for _, p := range pages {
 		base := filepath.Join(d.dir, "page-"+strconv.Itoa(p))
