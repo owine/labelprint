@@ -842,3 +842,26 @@ func TestCropsFieldMayExceed256Bytes(t *testing.T) {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
 }
+
+func TestHugePageIsA422(t *testing.T) {
+	requirePoppler(t)
+	fake, h := newTestServer(t)
+	shimTool(t, "pdftoppm", `echo "pdftoppm ran" >&2; exit 1`) // nothing may be drawn
+	for _, c := range []struct {
+		path, pages, layout string
+		page                int
+	}{
+		{"/api/preview", "1", "page", 1}, // the 96 dpi page image
+		{"/api/preview", "2", "auto", 2}, // the 50 dpi detection render
+		{"/api/print", "1", "page", 1},   // the label at 203 dpi
+	} {
+		rec, out := post(t, h, c.path, "x.pdf", fixHugePages(), map[string]string{"pages": c.pages, "layout": c.layout})
+		want := fmt.Sprintf("page %d is too large to print as a label", c.page)
+		if rec.Code != 422 || out["error"] != want {
+			t.Errorf("%s pages=%s layout=%s: %d %s, want 422 %q", c.path, c.pages, c.layout, rec.Code, rec.Body, want)
+		}
+	}
+	if n := len(fake.printJobs()); n != 0 {
+		t.Errorf("%d jobs sent", n)
+	}
+}

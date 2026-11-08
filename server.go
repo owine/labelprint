@@ -434,7 +434,10 @@ func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewRespon
 	if o.known {
 		resp.WidthIn, resp.HeightIn = round2(o.media.WidthMm/25.4), round2(o.media.HeightMm/25.4)
 	}
-	plans := doc.plan(ctx, pages, o)
+	plans, err := doc.plan(ctx, pages, o)
+	if err != nil {
+		return err
+	}
 	for _, pl := range plans {
 		if !pl.Skip {
 			resp.Labels += len(pl.Boxes)
@@ -619,8 +622,12 @@ func (s *server) buildJobs(ctx context.Context, up *upload, copies int, media, u
 		// One job per label: LPrint takes a single document per job
 		// (multiple-document-jobs-supported = false). Skipped pages (no
 		// label, beside pages with one) send nothing.
+		plans, err := doc.plan(ctx, pages, o)
+		if err != nil {
+			return nil, err
+		}
 		var out []printRequest
-		for _, pl := range doc.plan(ctx, pages, o) {
+		for _, pl := range plans {
 			if pl.Skip {
 				continue
 			}

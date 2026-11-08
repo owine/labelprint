@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"image"
 	"slices"
 )
@@ -34,9 +35,9 @@ type labelImg struct {
 }
 
 // plan picks every page's boxes: the user's crops, the whole page, or
-// detection. Detection never fails a request: a page it can't analyse gets
-// the whole page.
-func (d *pdfDoc) plan(ctx context.Context, pages []int, o labelOpts) []pagePlan {
+// detection. A page detection can't analyse gets the whole page; only a page
+// too large to render (checkRender) fails the request.
+func (d *pdfDoc) plan(ctx context.Context, pages []int, o labelOpts) ([]pagePlan, error) {
 	var detect []int
 	for _, p := range pages {
 		if _, ok := o.crops[p]; !ok && o.layout != "page" {
@@ -47,6 +48,10 @@ func (d *pdfDoc) plan(ctx context.Context, pages []int, o labelOpts) []pagePlan 
 	if len(detect) > 0 {
 		var err error
 		if renders, err = d.renderPages(ctx, detect, detectDPI, true); err != nil {
+			var ue *userError
+			if errors.As(err, &ue) {
+				return nil, err
+			}
 			// A fixed reason: poppler's messages can quote the document.
 			reason := "pdftoppm failed"
 			if ctx.Err() != nil {
@@ -75,7 +80,7 @@ func (d *pdfDoc) plan(ctx context.Context, pages []int, o labelOpts) []pagePlan 
 			out[i].Skip = out[i].Auto && out[i].Fallback
 		}
 	}
-	return out
+	return out, nil
 }
 
 // detectPage runs detection on a page's 50 dpi render. Embedded image

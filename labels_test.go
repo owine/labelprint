@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"image"
 	"testing"
 )
@@ -18,6 +20,15 @@ func openTest(t *testing.T, pdf []byte) *pdfDoc {
 }
 
 var canvas46 = canvas{W: 812, H: 1218}
+
+func mustPlan(t *testing.T, doc *pdfDoc, ctx context.Context, pages []int, o labelOpts) []pagePlan {
+	t.Helper()
+	pl, err := doc.plan(ctx, pages, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pl
+}
 
 // boxIn is a box from inches on a page of the given displayed size.
 func boxIn(pw, ph, x, y, w, h float64) box { return box{x / pw, y / ph, w / pw, h / ph} }
@@ -107,7 +118,7 @@ func TestRenderLabelTurnsLandscapeLabels(t *testing.T) {
 func TestRenderLabelKeepsTrueSize(t *testing.T) {
 	ctx := context.Background()
 	doc := openTest(t, fix2up())
-	b := doc.plan(ctx, []int{1}, opts46)[0].Boxes[0] // the top 6 × 4 in label, padded
+	b := mustPlan(t, doc, ctx, []int{1}, opts46)[0].Boxes[0] // the top 6 × 4 in label, padded
 	l, err := doc.label(ctx, 1, b, opts46)
 	if err != nil || l.Method != "render" {
 		t.Fatalf("%v %s", err, l.Method)
@@ -144,7 +155,7 @@ func TestRenderLabelShrinksToFit(t *testing.T) {
 func TestRenderLabelNeverEnlarges(t *testing.T) {
 	ctx := context.Background()
 	doc := openTest(t, fixSmallLabel()) // 3 × 5 in on 4 × 6 media
-	pl := doc.plan(ctx, []int{1}, opts46)[0]
+	pl := mustPlan(t, doc, ctx, []int{1}, opts46)[0]
 	if pl.Fallback || len(pl.Boxes) != 1 {
 		t.Fatalf("plan %+v", pl)
 	}
@@ -216,7 +227,7 @@ func TestPlanFixtures(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			doc := openTest(t, c.pdf)
-			pl := doc.plan(ctx, []int{1}, opts46)[0]
+			pl := mustPlan(t, doc, ctx, []int{1}, opts46)[0]
 			if !pl.Auto || pl.Fallback != c.fallback {
 				t.Fatalf("auto %v fallback %v", pl.Auto, pl.Fallback)
 			}
@@ -249,7 +260,7 @@ func TestPlanDocTabs(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			doc := openTest(t, c.pdf)
-			pl := doc.plan(ctx, []int{1}, opts46)[0]
+			pl := mustPlan(t, doc, ctx, []int{1}, opts46)[0]
 			if len(pl.Boxes) != 1 || len(pl.Tabs) != 1 || pl.Tabs[0] == nil {
 				t.Fatalf("boxes %v tabs %v", pl.Boxes, pl.Tabs)
 			}
@@ -283,7 +294,7 @@ func TestPlanDocTabs(t *testing.T) {
 func TestPlanFramedTabFirst(t *testing.T) {
 	ctx := context.Background()
 	doc := openTest(t, fixFramedTabFirst())
-	pl := doc.plan(ctx, []int{1, 2}, opts46)
+	pl := mustPlan(t, doc, ctx, []int{1, 2}, opts46)
 	if pl[0].Fallback || len(pl[0].Boxes) != 1 || len(pl[0].Tabs) != 1 || pl[0].Tabs[0] == nil {
 		t.Fatalf("fallback %v boxes %v tabs %v", pl[0].Fallback, pl[0].Boxes, pl[0].Tabs)
 	}
@@ -305,7 +316,7 @@ func TestPlanOverrides(t *testing.T) {
 	doc := openTest(t, makeLabelPDF(2))
 	o := opts46
 	o.crops = map[int][]box{1: {{0, 0, 0.5, 0.5}}}
-	pl := doc.plan(ctx, []int{1, 2}, o)
+	pl := mustPlan(t, doc, ctx, []int{1, 2}, o)
 	if pl[0].Auto || len(pl[0].Boxes) != 1 || pl[0].Boxes[0] != (box{0, 0, 0.5, 0.5}) {
 		t.Errorf("crops must win: %+v", pl[0])
 	}
@@ -314,7 +325,7 @@ func TestPlanOverrides(t *testing.T) {
 	}
 	o = opts46
 	o.layout = "page"
-	if pl := doc.plan(ctx, []int{1}, o); pl[0].Auto || pl[0].Boxes[0] != (box{0, 0, 1, 1}) {
+	if pl := mustPlan(t, doc, ctx, []int{1}, o); pl[0].Auto || pl[0].Boxes[0] != (box{0, 0, 1, 1}) {
 		t.Errorf("layout=page: %+v", pl[0])
 	}
 }
@@ -322,7 +333,7 @@ func TestPlanOverrides(t *testing.T) {
 func TestLabelMethods(t *testing.T) {
 	ctx := context.Background()
 	doc := openTest(t, fixUPS2up(true, 200))
-	for _, b := range doc.plan(ctx, []int{1}, opts46)[0].Boxes {
+	for _, b := range mustPlan(t, doc, ctx, []int{1}, opts46)[0].Boxes {
 		l, err := doc.label(ctx, 1, b, opts46)
 		if err != nil || l.Method != "native" {
 			t.Fatalf("%v %s", err, l.Method)
@@ -336,7 +347,7 @@ func TestLabelMethods(t *testing.T) {
 		assertSourcePixels(t, g, labelBitmap(800, 1200), 6, 9)
 	}
 	doc = openTest(t, fixBand())
-	b := doc.plan(ctx, []int{1}, opts46)[0].Boxes[0]
+	b := mustPlan(t, doc, ctx, []int{1}, opts46)[0].Boxes[0]
 	if l, err := doc.label(ctx, 1, b, opts46); err != nil || l.Method != "render" {
 		t.Fatalf("vector label: %v %s", err, l.Method)
 	}
@@ -345,29 +356,29 @@ func TestLabelMethods(t *testing.T) {
 func TestPlanSkipsPagesWithoutLabels(t *testing.T) {
 	ctx := context.Background()
 	doc := openTest(t, fixLabelThenText())
-	pl := doc.plan(ctx, []int{1, 2}, opts46)
+	pl := mustPlan(t, doc, ctx, []int{1, 2}, opts46)
 	if pl[0].Skip || !pl[1].Fallback || !pl[1].Skip {
 		t.Fatalf("p1 skip=%v; p2 fallback=%v skip=%v; want p2 skipped", pl[0].Skip, pl[1].Fallback, pl[1].Skip)
 	}
-	if pl := doc.plan(ctx, []int{2}, opts46); pl[0].Skip {
+	if pl := mustPlan(t, doc, ctx, []int{2}, opts46); pl[0].Skip {
 		t.Error("with no label anywhere in the selection, the fallback page still prints")
 	}
 	o := opts46
 	o.layout = "page"
-	for _, p := range doc.plan(ctx, []int{1, 2}, o) {
+	for _, p := range mustPlan(t, doc, ctx, []int{1, 2}, o) {
 		if p.Skip {
 			t.Error("layout=page never skips")
 		}
 	}
 	o = opts46
 	o.crops = map[int][]box{2: {{0, 0, 1, 1}}}
-	if pl := doc.plan(ctx, []int{1, 2}, o); pl[1].Skip {
+	if pl := mustPlan(t, doc, ctx, []int{1, 2}, o); pl[1].Skip {
 		t.Error("a page with crops is never skipped")
 	}
 	// Editing page 1 sends it as crops; it still counts as having labels.
 	o = opts46
 	o.crops = map[int][]box{1: {{0.2, 0.2, 0.5, 0.5}}}
-	pl = doc.plan(ctx, []int{1, 2}, o)
+	pl = mustPlan(t, doc, ctx, []int{1, 2}, o)
 	if pl[0].Skip || !pl[1].Skip {
 		t.Errorf("crops on p1: skip p1=%v p2=%v; want only p2 skipped", pl[0].Skip, pl[1].Skip)
 	}
@@ -383,7 +394,7 @@ func TestPlanEditedPageCountsAsLabelsWhenAllFellBack(t *testing.T) {
 	}
 	doc := openTest(t, b.bytes())
 	ctx := context.Background()
-	pl := doc.plan(ctx, []int{1, 2, 3}, opts46)
+	pl := mustPlan(t, doc, ctx, []int{1, 2, 3}, opts46)
 	for _, p := range pl {
 		if !p.Fallback || p.Skip {
 			t.Fatalf("p%d fallback=%v skip=%v; want all printing whole", p.Page, p.Fallback, p.Skip)
@@ -391,7 +402,7 @@ func TestPlanEditedPageCountsAsLabelsWhenAllFellBack(t *testing.T) {
 	}
 	o := opts46
 	o.crops = map[int][]box{2: {{0.1, 0.1, 0.5, 0.5}}}
-	pl = doc.plan(ctx, []int{1, 2, 3}, o)
+	pl = mustPlan(t, doc, ctx, []int{1, 2, 3}, o)
 	if !pl[0].Skip || pl[1].Skip || !pl[2].Skip {
 		t.Errorf("skips = %v %v %v; want true false true", pl[0].Skip, pl[1].Skip, pl[2].Skip)
 	}
@@ -411,4 +422,34 @@ func TestRenderLabelBlankBox(t *testing.T) {
 	if _, ok := inkBounds(g, g.Rect, 128); ok {
 		t.Error("a blank box should give a blank label")
 	}
+}
+
+// Huge pages are refused before poppler draws them: the shim makes any
+// pdftoppm run fail with a different error, so a render that slipped past the
+// check shows up without costing a 400 Mpx raster.
+func TestHugePagesAreRefusedBeforeRendering(t *testing.T) {
+	doc := openTest(t, fixHugePages())
+	shimTool(t, "pdftoppm", `echo "pdftoppm ran" >&2; exit 1`)
+	ctx := context.Background()
+	tooLarge := func(what string, page int, err error) {
+		t.Helper()
+		var ue *userError
+		want := fmt.Sprintf("page %d is too large to print as a label", page)
+		if !errors.As(err, &ue) || ue.Status != 422 || ue.Msg != want {
+			t.Errorf("%s: %v, want 422 %q", what, err, want)
+		}
+	}
+	whole := box{0, 0, 1, 1}
+	_, _, err := doc.renderLabel(ctx, 1, whole, canvas46)
+	tooLarge("label", 1, err)
+	_, err = doc.labelScale(ctx, 1, whole, canvas46)
+	tooLarge("tab scale", 1, err)
+	_, err = doc.label(ctx, 1, whole, opts46) // path A's check render too, if it got that far
+	tooLarge("label via path A", 1, err)
+	_, err = doc.renderPages(ctx, []int{1}, previewDPI, true)
+	tooLarge("96 dpi preview", 1, err)
+	_, err = doc.renderPages(ctx, []int{2}, detectDPI, true)
+	tooLarge("50 dpi detection", 2, err)
+	_, err = doc.plan(ctx, []int{2}, opts46)
+	tooLarge("plan", 2, err)
 }

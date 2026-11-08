@@ -534,3 +534,14 @@ func fixFramedTabFirst() []byte {
 	}
 	return b.bytes()
 }
+
+// fixHugePages is a 100 × 100 in page and a 200 × 200 in one (the most a PDF
+// page can be), each with one short line of text: cheap to build, far too
+// big to render at the printer's resolution.
+func fixHugePages() []byte {
+	var b pdfBuilder
+	for _, side := range []float64{100, 200} {
+		b.page(inches(side, side), 0).text(1, 1, 12, "huge page")
+	}
+	return b.bytes()
+}

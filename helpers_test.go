@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -126,3 +127,19 @@ func (b *ippResponseBuilder) mustBytes(t testing.TB) []byte {
 }
 
 var discardLog = slog.New(slog.DiscardHandler)
+
+// shimTool puts a shell script named tool first on PATH for the rest of the
+// test. The script can run the real tool as "$REAL" "$@".
+func shimTool(t *testing.T, tool, script string) {
+	t.Helper()
+	real, err := exec.LookPath(tool)
+	if err != nil {
+		t.Skipf("%s not installed", tool)
+	}
+	dir := t.TempDir()
+	body := fmt.Sprintf("#!/bin/sh\nREAL='%s'\n%s\n", real, script)
+	if err := os.WriteFile(filepath.Join(dir, tool), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}

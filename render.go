@@ -9,6 +9,7 @@ import (
 	"image"
 	"log/slog"
 	"math"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -130,6 +131,22 @@ func lastLine(s string) string {
 	return s
 }
 
+// maxRenderPx caps any one raster poppler draws for us, checked before it's
+// drawn. Letter at 203 dpi is about 3.9 Mpx and Tabloid 7.7 Mpx; a box or page
+// over this would be decoded and copied in Go several times over, which a
+// 512 MB container can't take. A PDF page can be 200 in on a side.
+const maxRenderPx = 40_000_000
+
+// checkRender refuses a w × h pixel render of page that's over maxRenderPx.
+// Previews, detection, labels and path A's check render all come through it.
+func checkRender(page int, w, h float64) error {
+	if w*h > maxRenderPx {
+		return &userError{Status: http.StatusUnprocessableEntity,
+			Msg: fmt.Sprintf("page %d is too large to print as a label", page)}
+	}
+	return nil
+}
+
 // canvas is the label in printer dots; zero when the media size is unknown.
 type canvas struct{ W, H int }
 
@@ -174,6 +191,12 @@ func (d *pdfDoc) renderPages(ctx context.Context, pages []int, dpi float64, aa b
 		return nil, err
 	}
 	defer os.RemoveAll(dir)
+	for _, p := range pages {
+		pw, ph := d.geom(p).size()
+		if err := checkRender(p, math.Ceil(pw/72*dpi), math.Ceil(ph/72*dpi)); err != nil {
+			return nil, err
+		}
+	}
 	sorted := slices.Sorted(slices.Values(pages))
 	for _, run := range runs(slices.Compact(sorted)) {
 		args := []string{"-png", "-gray", "-cropbox", "-r", fmtDPI(dpi)}
@@ -214,7 +237,11 @@ func (d *pdfDoc) renderPages(ctx context.Context, pages []int, dpi float64, aa b
 // resolution on each axis).
 func (d *pdfDoc) renderBoxAt(ctx context.Context, page int, b box, dpiX, dpiY float64, aa bool) (*image.Gray, error) {
 	pw, ph := d.geom(page).size()
-	r := b.pixels(pw/72*dpiX, ph/72*dpiY)
+	fw, fh := pw/72*dpiX, ph/72*dpiY
+	if err := checkRender(page, math.Ceil(b.W*fw)+1, math.Ceil(b.H*fh)+1); err != nil { // +1: pixels rounds outwards
+		return nil, err
+	}
+	r := b.pixels(fw, fh)
 	if r.Dx() < 1 || r.Dy() < 1 {
 		return nil, fmt.Errorf("page %d: the box is empty", page)
 	}
