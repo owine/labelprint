@@ -82,17 +82,48 @@ func TestRenderLabelTurnsLandscapeLabels(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 4.1 in across onto 4 in (812 dots)
-	if !near(scale, 812/4.1/203, 0.002) {
-		t.Errorf("scale %g, want about %.3f", scale, 812/4.1/203)
+	// The box is 4.1 in across once turned, but its ink (the border's outer
+	// edges, 3.93 × 5.93 in) fits 4 × 6 in: no shrinking for white.
+	if scale != 1 {
+		t.Errorf("scale %g: the ink fits, so it prints at true size", scale)
 	}
 	assertPureLabel(t, g, canvas46)
-	// the corner block (top-left of the label as drawn) ends up top-right
-	if g.Pix[75*g.Stride+742] != 0 {
-		t.Error("corner block isn't at the top right after turning clockwise")
+	// The ink is 797 × 1203 dots once turned, centred at (7, 7). It starts
+	// 0.036 in (7 dots) outside the label's border line, so the corner block,
+	// 0.15–0.55 in into the label (dots 23–104 of the ink), turned clockwise
+	// lands at x 797−104…797−23 + 7 = 700–781, y 23–104 + 7 = 30–111.
+	for _, p := range []image.Point{{742, 75}, {701, 31}, {780, 110}} {
+		if g.Pix[p.Y*g.Stride+p.X] != 0 {
+			t.Errorf("corner block isn't at the top right after turning clockwise (%v is white)", p)
+		}
 	}
-	if g.Pix[75*g.Stride+70] != 255 {
-		t.Error("top left should be blank")
+	for _, p := range []image.Point{{70, 75}, {698, 75}, {742, 113}} {
+		if g.Pix[p.Y*g.Stride+p.X] != 255 {
+			t.Errorf("%v should be blank", p)
+		}
+	}
+}
+
+func TestRenderLabelKeepsTrueSize(t *testing.T) {
+	ctx := context.Background()
+	doc := openTest(t, fix2up())
+	b := doc.plan(ctx, []int{1}, opts46)[0].Boxes[0] // the top 6 × 4 in label, padded
+	l, err := doc.label(ctx, 1, b, opts46)
+	if err != nil || l.Method != "render" {
+		t.Fatalf("%v %s", err, l.Method)
+	}
+	if l.Scale != 1 {
+		t.Errorf("scale %g: an exact 6 × 4 in label isn't shrunk for its box's padding", l.Scale)
+	}
+	img, err := decodePNGBytes(l.PNG)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := toGray(img)
+	assertPureLabel(t, g, canvas46)
+	// the border's ink, 3.93 × 5.93 in once turned, at 203 dpi
+	if ink, ok := inkBounds(g, g.Rect, 128); !ok || !near(float64(ink.Dx()), 3.928*203, 3) || !near(float64(ink.Dy()), 5.928*203, 3) {
+		t.Errorf("ink %v, want about %.0fx%.0f dots", ink, 3.928*203, 5.928*203)
 	}
 }
 
@@ -103,9 +134,10 @@ func TestRenderLabelShrinksToFit(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertPureLabel(t, g, canvas46)
-	// 6.25 in onto 6 in (1218 dots): 1218 / 6.25 / 203
-	if !near(scale, 0.96, 0.005) {
-		t.Errorf("scale %g, want about 0.96", scale)
+	// The page is 6.25 in, but the ink (the border's outer edges, 0.09 to
+	// 6.16 in) is 6.08 in: 1234 dots onto 1218, 0.987.
+	if !near(scale, 1218/(6.078*203), 0.003) {
+		t.Errorf("scale %g, want about %.3f", scale, 1218/(6.078*203))
 	}
 }
 
@@ -311,5 +343,21 @@ func TestPlanSkipsPagesWithoutLabels(t *testing.T) {
 	o.crops = map[int][]box{2: {{0, 0, 1, 1}}}
 	if pl := doc.plan(ctx, []int{1, 2}, o); pl[1].Skip {
 		t.Error("a page with crops is never skipped")
+	}
+}
+
+func TestRenderLabelBlankBox(t *testing.T) {
+	doc := openTest(t, fix2up())
+	// the white gutter between the two labels
+	g, scale, err := doc.renderLabel(context.Background(), 1, boxIn(8.5, 11, 1.5, 4.9, 5, 0.6), canvas46)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPureLabel(t, g, canvas46)
+	if scale != 1 {
+		t.Errorf("scale %g for a blank box", scale)
+	}
+	if _, ok := inkBounds(g, g.Rect, 128); ok {
+		t.Error("a blank box should give a blank label")
 	}
 }

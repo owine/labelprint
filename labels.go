@@ -47,7 +47,12 @@ func (d *pdfDoc) plan(ctx context.Context, pages []int, o labelOpts) []pagePlan 
 	if len(detect) > 0 {
 		var err error
 		if renders, err = d.renderPages(ctx, detect, detectDPI, true); err != nil {
-			d.r.log.Warn("detection render failed", "error", err)
+			// A fixed reason: poppler's messages can quote the document.
+			reason := "pdftoppm failed"
+			if ctx.Err() != nil {
+				reason = "cancelled"
+			}
+			d.r.log.Warn("detection render failed", "reason", reason)
 		}
 	}
 	out := make([]pagePlan, 0, len(pages))
@@ -81,7 +86,7 @@ func (d *pdfDoc) detectPage(ctx context.Context, page int, png []byte, o labelOp
 	}
 	img, err := decodePNGBytes(png)
 	if err != nil {
-		d.r.log.Warn("detection failed", "page", page, "error", err)
+		d.r.log.Warn("detection failed", "page", page, "reason", "unreadable render")
 		return whole
 	}
 	m := newMask(img)

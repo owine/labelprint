@@ -271,25 +271,42 @@ func (d *pdfDoc) renderBoxAt(ctx context.Context, page int, b box, dpiX, dpiY fl
 	return toGray(img), nil // poppler may write -gray as RGB
 }
 
-// renderLabel is path B: the box rendered at the printer's resolution, or
-// smaller if that's what it takes to fit the canvas, never larger: carriers
-// want labels at true size (anti-aliasing off), thresholded, turned to the
-// canvas's orientation and centred on it. scale is the render's size against
-// true size: 1, or below 1 when the box was shrunk to fit.
+// renderLabel is path B: the box rendered at the printer's resolution
+// (anti-aliasing off), thresholded, cropped to its ink, turned to the
+// canvas's orientation and centred on it. Carriers want labels at true size,
+// so it's never enlarged, and it's shrunk only when the ink itself doesn't
+// fit: the box's white padding is never a reason to shrink. scale is the
+// render's size against true size: 1, or below 1 when it was shrunk.
 func (d *pdfDoc) renderLabel(ctx context.Context, page int, b box, cv canvas) (g *image.Gray, scale float64, err error) {
-	pw, ph := d.geom(page).size()
-	bw, bh := b.W*pw/72, b.H*ph/72
 	dpi := float64(d.r.dpi)
-	if cv.known() {
-		if (bw > bh) != cv.landscape() {
-			bw, bh = bh, bw
-		}
-		dpi = min(dpi, float64(cv.W)/bw, float64(cv.H)/bh)
-	}
 	if g, err = d.renderBoxAt(ctx, page, b, dpi, dpi, false); err != nil {
 		return nil, 0, err
 	}
-	return fitCanvas(threshold(g, 128), cv), dpi / float64(d.r.dpi), nil
+	g = threshold(g, 128)
+	if !cv.known() {
+		return fitCanvas(g, cv), 1, nil
+	}
+	ink, ok := inkBounds(g, g.Rect, 128)
+	if !ok { // a blank box: nothing to fit
+		return fitCanvas(g, cv), 1, nil
+	}
+	iw, ih := float64(ink.Dx()), float64(ink.Dy())
+	if iw != ih && (iw > ih) != cv.landscape() {
+		iw, ih = ih, iw // as fitCanvas will turn it
+	}
+	if iw <= float64(cv.W) && ih <= float64(cv.H) {
+		// Centring the ink rather than the box: centre adds the white.
+		return fitCanvas(subGray(g, ink), cv), 1, nil
+	}
+	scale = min(float64(cv.W)/iw, float64(cv.H)/ih)
+	if g, err = d.renderBoxAt(ctx, page, b, dpi*scale, dpi*scale, false); err != nil {
+		return nil, 0, err
+	}
+	g = threshold(g, 128)
+	if ink, ok = inkBounds(g, g.Rect, 128); ok { // a fractional dpi can give a dot too many: centre crops it
+		g = subGray(g, ink)
+	}
+	return fitCanvas(g, cv), scale, nil
 }
 
 // fitCanvas turns a label to the canvas's orientation and centres it on a
