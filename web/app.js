@@ -87,7 +87,7 @@ function renderPrinter(p) {
 
 function fillMedia(p) {
   const sel = $('media');
-  const keep = mediaPicked ? sel.value : pref.get(PREF_MEDIA) || sel.value;
+  const keep = mediaChoice || pref.get(PREF_MEDIA) || sel.value;
   sel.replaceChildren();
   for (const m of p.media) {
     sel.append(el('option', { value: m.name, textContent: m.label + (m.ready ? ' · loaded' : '') }));
@@ -288,7 +288,7 @@ $('form').addEventListener('submit', async (e) => {
     r.jobs.forEach((j) => state.mine.add(j.id));
     state.lastResult = r;
     renderPrintResult();
-    resetCopies();
+    resetCopies(fields.copies);
   } catch (err) {
     const sent = err.body?.jobs || [];
     sent.forEach((j) => state.mine.add(j.id));
@@ -427,27 +427,35 @@ const pref = {
   del(k) { try { localStorage.removeItem(k); } catch { /* storage blocked */ } },
 };
 
-// Until a size is picked here, refreshes keep trying the saved one, so it
-// still lands if lprint was unreachable when the page loaded.
-let mediaPicked = false;
+// The size picked in this tab. fillMedia falls back to the default while
+// lprint doesn't list it, and puts it back when lprint lists it again; until
+// something is picked here, the saved size plays that part (so it still lands
+// if lprint was unreachable when the page loaded).
+let mediaChoice = null;
 $('media').addEventListener('change', () => {
-  mediaPicked = true;
-  pref.set(PREF_MEDIA, $('media').value);
+  mediaChoice = $('media').value;
+  pref.set(PREF_MEDIA, mediaChoice);
 });
 
+// whole numbers only: the server refuses anything else, so "2.5" isn't saved as 2
+const wholeCopies = (v) => (/^\d+$/.test(v.trim()) ? parseInt(v, 10) : NaN);
+
 $('copies').addEventListener('input', () => {
-  const n = parseInt($('copies').value, 10);
+  const n = wholeCopies($('copies').value);
   if (n === 1) pref.del(PREF_COPIES);
   else if (n > 1 && n <= state.maxCopies) pref.set(PREF_COPIES, String(n));
 });
 
-function resetCopies() {
+// After a successful print, unless the count was changed while it was sending.
+function resetCopies(sent) {
+  if ($('copies').value !== sent) return;
   $('copies').value = '1';
   pref.del(PREF_COPIES);
 }
 
-{
-  const n = parseInt(pref.get(PREF_COPIES), 10);
+// Called once the real copies limit (MAX_COPIES) has come from /api/printer.
+function restoreCopies() {
+  const n = wholeCopies(pref.get(PREF_COPIES) || '');
   if (n > 1 && n <= state.maxCopies) $('copies').value = String(n);
 }
 
@@ -469,6 +477,8 @@ $('theme').addEventListener('click', () => {
     $('max-mb').textContent = p.maxUploadMB;
     $('copies').max = p.maxCopies;
   }
+  restoreCopies();
+  updateSummary();
   fillMedia(p || { media: [{ name: 'na_index-4x6_4x6in', label: '4 × 6 in' }], defaultMedia: 'na_index-4x6_4x6in' });
   loadJobs();
   setInterval(async () => { const q = await loadPrinter(); if (q) fillMedia(q); }, 30000);
