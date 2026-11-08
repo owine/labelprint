@@ -270,6 +270,21 @@ tr.mine td.num { color: var(--accent); }
 .label-item figcaption.warn { color: var(--warning); }
 .preview .caption.err { color: var(--danger); }
 
+/* ---------- doc tab choice ---------- */
+.tab-choice { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tab-choice .hint { flex-basis: 100%; }
+.hint.warn { color: var(--warning); }
+.seg button[aria-disabled="true"] { color: var(--fg-4); cursor: not-allowed; }
+/* a doc tab printed on its own: numbered like a box, its × above any box it touches */
+.crop-tab .crop-num { background: var(--warning); color: var(--card); }
+.crop-tab .crop-del { z-index: 1; }
+/* the choice fills the label's column; a long option wraps inside its button */
+.tab-choice .seg { display: flex; width: 100%; }
+.tab-choice .seg button { flex: 1 1 auto; justify-content: center; text-align: center; white-space: normal; padding-block: 4px; }
+.crop-tab.tall .crop-num, .crop-tab.tall .crop-del { left: 50%; right: auto; translate: -50% 0; }
+.crop-tab.tall .crop-del { top: 24px; }
+.label-item.stale img { opacity: 0.4; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
