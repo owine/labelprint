@@ -94,7 +94,7 @@ func TestWriteFixtures(t *testing.T) {
 		"10-ups-300ppi.pdf": fixUPS2up(false, 300), "11-return-tab.pdf": fixReturn(1340, 206, 196),
 		"12-return-tab-193.pdf": fixReturn(1395, 193, 193), "13-band.pdf": fixBand(),
 		"14-label-then-text.pdf": fixLabelThenText(), "15-small-label.pdf": fixSmallLabel(),
-		"16-framed-tab-first.pdf": fixFramedTabFirst(),
+		"16-framed-tab-first.pdf": fixFramedTabFirst(), "17-label-then-one-line.pdf": fixLabelThenOneLine(),
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), pdf, 0o644); err != nil {
 			t.Fatal(err)

@@ -117,3 +117,27 @@ func TestParseLayout(t *testing.T) {
 		t.Error("unknown layout accepted")
 	}
 }
+
+// The page sends fractions rounded to 4 decimals, so a box at the page's edge
+// can come back with x + w = 1.0001. That's on the page (and clamped); a box
+// really past the edge isn't.
+func TestCropsAtThePageEdge(t *testing.T) {
+	inch := func(int) (float64, float64) { return 8.5, 11 }
+	got, err := parseCrops(`{"1": [[0.5, 0.4, 0.5001, 0.6001]]}`, []int{1}, inch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := got[1][0]; b.X+b.W > 1 || b.Y+b.H > 1 {
+		t.Errorf("not clamped to the page: %+v", b)
+	}
+	for _, b := range []box{{-0.0001, 0, 0.5, 0.5}, {0.5, 0.5, 0.50015, 0.5}} {
+		if !b.valid() {
+			t.Errorf("%+v: rounding slack refused", b)
+		}
+	}
+	for _, b := range []box{{-0.001, 0, 0.5, 0.5}, {0.5, 0.5, 0.501, 0.5}} {
+		if b.valid() {
+			t.Errorf("%+v: off the page, accepted", b)
+		}
+	}
+}

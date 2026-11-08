@@ -545,3 +545,12 @@ func fixHugePages() []byte {
 	}
 	return b.bytes()
 }
+
+// fixLabelThenOneLine is a label page, then a page with one short line of
+// text: its fallback box is far under the 0.5 in a crop must be.
+func fixLabelThenOneLine() []byte {
+	var b pdfBuilder
+	b.page(letter, 0).vectorLabel(2.25, 2.5, 4, 6)
+	b.page(letter, 0).text(3, 5, 10, "keep this page for your records")
+	return b.bytes()
+}

@@ -113,11 +113,14 @@ function labelNumbers(pg) {
   });
 }
 
+// A detected or fallback box can be under MIN_IN (a skipped page holding one
+// line of text, a small label's box once its page is edited): each box is
+// grown to it before sending, since the server refuses smaller crops.
 function cropsField() {
   const out = {};
   for (const pg of state.pdf.pages.values()) {
     if (!pg.edited || !pg.boxes.length) continue;
-    out[pg.page] = flatBoxes(pg).map((b) => [b.x, b.y, b.w, b.h].map(round4));
+    out[pg.page] = flatBoxes(pg).map((b) => growBox(b, pg)).map((b) => [b.x, b.y, b.w, b.h].map(round4));
   }
   return Object.keys(out).length ? JSON.stringify(out) : '';
 }

@@ -453,3 +453,18 @@ func TestHugePagesAreRefusedBeforeRendering(t *testing.T) {
 	_, err = doc.plan(ctx, []int{2}, opts46)
 	tooLarge("plan", 2, err)
 }
+
+// A skipped page's fallback box is the page's ink, padded, so it can be
+// smaller than a crop may be; the page grows it before sending it as crops.
+func TestFallbackBoxCanBeUnderTheCropMinimum(t *testing.T) {
+	doc := openTest(t, fixLabelThenOneLine())
+	pl := mustPlan(t, doc, context.Background(), []int{1, 2}, opts46)[1]
+	if !pl.Skip || len(pl.Boxes) != 1 || pl.Boxes[0].H*11 >= minBoxIn {
+		t.Fatalf("page 2: skip %v, boxes %+v; want one skipped box under %g in tall", pl.Skip, pl.Boxes, minBoxIn)
+	}
+	b := pl.Boxes[0].round4()
+	if _, err := parseCrops(fmt.Sprintf(`{"2": [[%g, %g, %g, %g]]}`, b.X, b.Y, b.W, b.H), []int{2},
+		func(int) (float64, float64) { return 8.5, 11 }); err == nil {
+		t.Error("sent as it is, the box should be refused")
+	}
+}

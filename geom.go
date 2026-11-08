@@ -57,9 +57,11 @@ func (b box) intersect(o box) (box, bool) {
 	return box{x0, y0, x1 - x0, y1 - y0}, true
 }
 
-// valid reports whether b is a finite, non-empty rectangle on the page.
+// valid reports whether b is a finite, non-empty rectangle on the page. The
+// slack is for the page's 4-decimal rounding, which can put x + w at 1.0001;
+// parseCrops clamps what it lets through.
 func (b box) valid() bool {
-	const eps = 1e-6
+	const eps = 2e-4
 	for _, v := range []float64{b.X, b.Y, b.W, b.H} {
 		if math.IsNaN(v) || math.IsInf(v, 0) {
 			return false
