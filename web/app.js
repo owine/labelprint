@@ -11,14 +11,13 @@ const el = (tag, props = {}, ...children) => {
 
 const state = {
   file: null,
-  kind: null,          // server-confirmed: zpl | pdf | png | jpeg
-  objectURL: null,
+  kind: null,          // server-confirmed: zpl | pdf | png | jpeg | gif
   previewSeq: 0,       // drops out-of-order preview replies
   mine: new Set(),     // job ids submitted from this page
   lastResult: null,    // { jobs, warnings } of the last print, for live updates
   maxMB: 20,
   maxCopies: 100,
-  layout: 'auto',      // label area for pdfs: auto | page
+  layout: 'auto',      // label area for pdfs and images: auto | page
   pdf: { pages: new Map(), media: null, labelsElsewhere: 0, meta: null },
   previewError: null,  // a field the last preview refused (pages, crops, layout): print waits for a good one
 };
@@ -53,7 +52,16 @@ function formData(extra = {}) {
 //
 // For PDFs the server finds label boxes on each page. The page shows them over
 // the page image; edits go back as `crops` for that page. Boxes are fractions
-// of the page as displayed: x, y, w, h from the top-left.
+// of the page as displayed: x, y, w, h from the top-left. An image (png, jpeg,
+// gif) is a one-page pdf to the server, so it gets all of this as page 1.
+
+// paged: kinds the server previews as pages with label boxes.
+const paged = (kind) => kind === 'pdf' || kind === 'png' || kind === 'jpeg' || kind === 'gif';
+// How the preview names a page: a pdf's by number, an image as itself.
+const isImage = () => paged(state.kind) && state.kind !== 'pdf';
+const pageRef = (pg) => (isImage() ? 'the image' : `page ${pg.page}`);
+const pageTag = (pg) => (isImage() ? 'image' : `p${pg.page}`);
+const wholeName = () => (isImage() ? 'image' : 'page');
 
 const MIN_IN = 0.5;   // the server refuses smaller boxes
 const MAX_BOXES = 8;  // per page, as the server allows
@@ -317,8 +325,6 @@ const fmtSize = (n) => (n < 1024 ? `${n} B` : n < 1 << 20 ? `${(n / 1024).toFixe
 
 function chooseFile(file) {
   clearResult();
-  if (state.objectURL) URL.revokeObjectURL(state.objectURL);
-  state.objectURL = null;
   state.file = file;
   state.kind = null;
   state.previewError = null;
@@ -371,7 +377,7 @@ async function preview() {
     if (field) state.previewError = e.message;
     // The range, size or layout changed, so the pages on screen are gone from
     // state: take them away rather than leave boxes that edit nothing.
-    if (field && state.kind === 'pdf' && !state.pdf.pages.size) {
+    if (field && paged(state.kind) && !state.pdf.pages.size) {
       $('preview-grid').replaceChildren();
       $('preview-note').textContent = '';
     }
@@ -405,8 +411,9 @@ function showPreview(r) {
   state.kind = r.kind;
   $('file-kind').textContent = r.kind;
   $('file-kind').className = 'badge badge-accent';
-  $('pages-field').hidden = r.kind !== 'pdf';
-  $('layout-field').hidden = r.kind !== 'pdf';
+  $('pages-field').hidden = r.kind !== 'pdf'; // an image is one page
+  $('layout-field').hidden = !paged(r.kind);
+  $('layout-whole').textContent = r.kind === 'pdf' ? 'whole page' : 'whole image';
   setMediaHint(r.kind);
   renderPreview(r);
   updateSummary();
@@ -415,23 +422,19 @@ function showPreview(r) {
 function renderPreview(r) {
   const grid = $('preview-grid');
   const note = $('preview-note');
-  if (r.kind !== 'pdf') grid.replaceChildren(); // renderPdf swaps the pages itself, keeping focus
-  grid.classList.toggle('pdf-mode', r.kind === 'pdf');
+  if (!paged(r.kind)) grid.replaceChildren(); // renderPdf swaps the pages itself, keeping focus
+  grid.classList.toggle('pdf-mode', paged(r.kind));
   note.classList.remove('err');
+  imageNote(r);
   // zpl only, and never a block: the zpl is sent unchanged whatever its size
   const warning = $('preview-warning');
   warning.textContent = r.fitWarning || '';
   warning.hidden = !r.fitWarning;
   document.querySelector('.zpl-source')?.remove();
   $('preview').hidden = false;
-  if (r.kind === 'pdf') {
+  if (paged(r.kind)) {
     absorbPdf(r);
     renderPdf();
-  } else if (r.kind === 'png' || r.kind === 'jpeg') {
-    state.objectURL = URL.createObjectURL(state.file);
-    note.textContent = 'scaled to fit the label';
-    grid.append(el('figure', { className: 'preview-item' },
-      el('img', { src: state.objectURL, alt: state.file.name })));
   } else if (r.kind === 'zpl') {
     const n = r.labels || 0;
     const count = `${n} label${n === 1 ? '' : 's'}`;
@@ -451,6 +454,28 @@ function renderPreview(r) {
   }
 }
 
+const fmtPPI = (v) => String(Math.round(v * 10) / 10);
+
+// An image's size, above its page: where its ppi came from, and the inches
+// that makes it. A guessed ppi is a warning, so a wrong size can't go unseen;
+// the boxes and "whole image" are there to act on it.
+function imageNote(r) {
+  const im = r.image;
+  const node = $('image-note');
+  node.hidden = !im;
+  if (!im) return;
+  const m = r.widthIn ? { w: r.widthIn, h: r.heightIn } : null;
+  const inches = `${fmtIn(im.w / im.ppi)} × ${fmtIn(im.h / im.ppi)} in`;
+  const px = `${im.w} × ${im.h} px`;
+  const guessed = im.ppiSource === 'default';
+  let how;
+  if (guessed) how = `${px} (size guessed at ${fmtPPI(im.ppi)} ppi — check it)`;
+  else if (im.ppiSource === 'phys' || im.ppiSource === 'jfif') how = `${px} at ${fmtPPI(im.ppi)} ppi (from the file)`;
+  else how = `${px} at ${fmtPPI(im.ppi)} ppi (matched to the ${m ? `${fmtIn(m.w)} × ${fmtIn(m.h)} in ` : ''}labels)`;
+  node.textContent = `${how} → ${inches}`;
+  node.classList.toggle('warn', guessed);
+}
+
 function renderPdf() {
   const grid = $('preview-grid');
   const note = $('preview-note');
@@ -463,7 +488,9 @@ function renderPdf() {
   const shown = state.pdf.pages.size;
   const n = pdfLabelCount();
   const m = state.pdf.media;
-  note.textContent = `${selected} of ${pageCount} page${pageCount === 1 ? '' : 's'} · ${n} label${n === 1 ? '' : 's'}` +
+  // an image's own line is the image note, above
+  note.textContent = (isImage() ? '' : `${selected} of ${pageCount} page${pageCount === 1 ? '' : 's'} · `) +
+    `${n} label${n === 1 ? '' : 's'}` +
     (m ? ` · black and white, sized for ${fmtIn(m.w)} × ${fmtIn(m.h)} in` : '') +
     (selected > shown ? ` · showing the first ${shown} pages` : '');
   grid.replaceChildren(...[...state.pdf.pages.values()].map(pageFigure));
@@ -473,20 +500,21 @@ function renderPdf() {
 
 function pageCaption(pg) {
   const n = pg.boxes.length;
+  const tag = pageTag(pg);
   if (pg.edited) {
     const k = flatBoxes(pg).length;
-    return `p${pg.page} · ${k} label area${k === 1 ? '' : 's'}, edited`;
+    return `${tag} · ${k} label area${k === 1 ? '' : 's'}, edited`;
   }
-  if (pg.skipped) return `p${pg.page} · no label found, not printing`;
-  if (pg.fallback) return `p${pg.page} · no label found, using the whole page`;
-  if (pg.auto) return `p${pg.page} · ${n} label${n === 1 ? '' : 's'} found`;
-  return `p${pg.page} · whole page`;
+  if (pg.skipped) return `${tag} · no label found, not printing`;
+  if (pg.fallback) return `${tag} · no label found, using the whole ${wholeName()}`;
+  if (pg.auto) return `${tag} · ${n} label${n === 1 ? '' : 's'} found`;
+  return `${tag} · whole ${wholeName()}`;
 }
 
 function pageFigure(pg) {
   const skipped = pg.skipped && !pg.edited;
   const stage = el('div', { className: 'page-stage' },
-    el('img', { src: pg.image, alt: `page ${pg.page}`, draggable: false }));
+    el('img', { src: pg.image, alt: pageRef(pg), draggable: false }));
   stage.style.aspectRatio = `${pg.widthIn} / ${pg.heightIn}`;
   const nums = labelNumbers(pg);
   pg.boxes.forEach((b, i) => {
@@ -498,21 +526,21 @@ function pageFigure(pg) {
   const tools = el('div', { className: 'page-tools' }, el('span', { className: 'caption', textContent: pageCaption(pg) }));
   if (skipped) {
     const include = el('button', { type: 'button', className: 'btn btn-ghost btn-sm', textContent: 'include' });
-    include.setAttribute('aria-label', `include page ${pg.page}: print it as a label`);
+    include.setAttribute('aria-label', `include ${pageRef(pg)}: print it as a label`);
     include.dataset.tool = 'include';
     include.addEventListener('click', () => { if (!live(pg)) return; pg.edited = true; markEdited(pg); focusTool(pg, 'reset'); });
     tools.append(include);
   }
   const add = el('button', { type: 'button', className: 'btn btn-ghost btn-sm', textContent: 'add label' });
-  add.setAttribute('aria-label', `add a label area to page ${pg.page}`);
+  add.setAttribute('aria-label', `add a label area to ${pageRef(pg)}`);
   add.dataset.tool = 'add';
   add.disabled = flatBoxes(pg).length >= MAX_BOXES;
-  if (add.disabled) add.title = `${MAX_BOXES} label areas is the most a page can have`;
+  if (add.disabled) add.title = `${MAX_BOXES} label areas is the most ${isImage() ? 'an image' : 'a page'} can have`;
   add.addEventListener('click', () => addBox(pg));
   tools.append(add);
   if (pg.edited) {
     const reset = el('button', { type: 'button', className: 'btn btn-ghost btn-sm', textContent: 'reset' });
-    reset.setAttribute('aria-label', `reset page ${pg.page}`);
+    reset.setAttribute('aria-label', `reset ${pageRef(pg)}`);
     reset.dataset.tool = 'reset';
     reset.addEventListener('click', () => { resetPage(pg); if (!focusTool(pg, 'include')) focusTool(pg, 'add'); });
     tools.append(reset);
@@ -561,8 +589,8 @@ function boxEl(pg, b, i, num) {
   const size = `${fmtIn(b.w * pg.widthIn)} × ${fmtIn(b.h * pg.heightIn)} in`;
   const tab = !b.tab ? '' : `, doc tab ${{ off: 'left off', include: 'included', separate: `printed as label ${num + 1}` }[b.choice]}`;
   node.setAttribute('aria-label', skipped
-    ? `label area ${num} on page ${pg.page}, ${size}, not printing: move or resize it to include the page`
-    : `label area ${num} on page ${pg.page}, ${size}${tab}: drag or arrow keys to move, ` +
+    ? `label area ${num} on ${pageRef(pg)}, ${size}, not printing: move or resize it to include the ${wholeName()}`
+    : `label area ${num} on ${pageRef(pg)}, ${size}${tab}: drag or arrow keys to move, ` +
       'corners or alt+arrow keys to resize, delete to remove');
   place(node, b);
   node.append(el('span', { className: 'crop-num', textContent: num }));
@@ -573,7 +601,7 @@ function boxEl(pg, b, i, num) {
   }
   if (!skipped) {
     const del = el('button', { type: 'button', className: 'crop-del', textContent: '×' });
-    del.setAttribute('aria-label', `remove label area ${num} from page ${pg.page}`);
+    del.setAttribute('aria-label', `remove label area ${num} from ${pageRef(pg)}`);
     del.addEventListener('pointerdown', (e) => e.stopPropagation());
     del.addEventListener('click', () => removeBox(pg, b));
     node.append(del);
@@ -676,7 +704,7 @@ function tabOutline(pg, b, i, num) {
     if (b.tab.h * pg.heightIn > b.tab.w * pg.widthIn) node.classList.add('tall');
     node.append(el('span', { className: 'crop-num', textContent: num + 1 }));
     const del = el('button', { type: 'button', className: 'crop-del', textContent: '×' });
-    del.setAttribute('aria-label', `stop printing the doc tab of label ${num} on its own (label ${num + 1}, page ${pg.page})`);
+    del.setAttribute('aria-label', `stop printing the doc tab of label ${num} on its own (label ${num + 1}, ${pageRef(pg)})`);
     del.addEventListener('click', () => { setChoice(pg, b, 'off'); focusBox(pg, i); });
     node.append(del);
   }
@@ -739,7 +767,7 @@ function tabChoice(pg, b, num, li) {
     }
     if (v === 'separate' && full) {
       btn.setAttribute('aria-disabled', 'true');
-      btn.setAttribute('aria-describedby', hint('full', `print separately: a page holds at most ${MAX_BOXES} labels`));
+      btn.setAttribute('aria-describedby', hint('full', `print separately: ${isImage() ? 'an image' : 'a page'} holds at most ${MAX_BOXES} labels`));
     }
     btn.addEventListener('click', () => { if (btn.getAttribute('aria-disabled') !== 'true') setChoice(pg, b, v); });
     seg.append(btn);
@@ -800,7 +828,7 @@ function updateSummary() {
   const copiesOK = copies >= 1 && copies <= state.maxCopies;
   if (copiesOK) $('copies').removeAttribute('aria-invalid');
   else $('copies').setAttribute('aria-invalid', 'true');
-  const empty = state.kind === 'pdf' ? emptyPages() : [];
+  const empty = paged(state.kind) ? emptyPages() : [];
   btn.disabled = !state.kind || !copiesOK || empty.length > 0 || !!state.previewError;
   const sum = $('summary');
   if (!state.file) { sum.textContent = 'choose a file to start'; return; }
@@ -808,10 +836,12 @@ function updateSummary() {
   if (state.previewError) { sum.textContent = state.previewError; return; }
   if (!copiesOK) { sum.textContent = `copies: a whole number, 1 to ${state.maxCopies}`; return; }
   let units = 1;
-  if (state.kind === 'pdf') units = pdfLabelCount();
+  if (paged(state.kind)) units = pdfLabelCount();
   const total = units * copies;
   if (empty.length) {
-    sum.textContent = `page ${empty[0].page} has no labels — add one, reset it, or leave it out of the page range`;
+    sum.textContent = isImage()
+      ? 'image has no labels — add one or choose whole image'
+      : `page ${empty[0].page} has no labels — add one, reset it, or leave it out of the page range`;
     return;
   }
   sum.textContent = copies > 1 && units > 1
@@ -835,9 +865,10 @@ $('pages').addEventListener('input', () => {
   if (state.kind === 'pdf') $('preview').classList.add('loading');
   schedulePreview();
 });
+// An image's ppi can be matched to the label size, so it re-previews too.
 $('media').addEventListener('change', () => {
-  if (state.kind === 'pdf') clearEdits();
-  if (state.kind === 'zpl' || state.kind === 'pdf') preview();
+  if (paged(state.kind)) clearEdits();
+  if (state.kind === 'zpl' || paged(state.kind)) preview();
 });
 for (const radio of document.querySelectorAll('input[name="layout"]')) {
   radio.addEventListener('change', () => { state.layout = radio.value; clearEdits(); preview(); });
@@ -869,7 +900,7 @@ $('form').addEventListener('submit', async (e) => {
   const btn = $('print');
   btn.disabled = true;
   btn.textContent = 'printing…';
-  showResult('info', state.kind === 'pdf' ? 'rendering and sending to lprint…' : 'sending to lprint…');
+  showResult('info', paged(state.kind) ? 'rendering and sending to lprint…' : 'sending to lprint…');
   const fields = { ...requestFields(), copies: $('copies').value };
   if (state.kind === 'zpl') delete fields.media;
   try {
@@ -1200,7 +1231,7 @@ $('theme').addEventListener('click', () => {
 // query goes at once, so a reload can't ask for a token that's already used.
 const shareErrors = {
   'too-big': () => `that file is over the ${state.maxMB} MB limit`,
-  unsupported: () => "labelprint can't print that file — share a zpl, pdf, png or jpeg",
+  unsupported: () => "labelprint can't print that file — share a zpl, pdf, png, jpeg or gif",
   epl2: () => "EPL2 isn't supported — choose zpl or pdf in your shipping tool",
   unreadable: () => "couldn't read the shared file — try sharing it again",
 };

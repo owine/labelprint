@@ -420,6 +420,10 @@ func TestManifestAndWorker(t *testing.T) {
 		len(st.Params.Files) != 1 || st.Params.Files[0].Name != "file" {
 		t.Fatalf("share_target = %+v", st)
 	}
+	if accept := strings.Join(st.Params.Files[0].Accept, " "); !strings.Contains(accept, "image/gif") ||
+		!strings.Contains(accept, ".gif") {
+		t.Errorf("share_target doesn't accept gifs: %s", accept)
+	}
 	if m.StartURL != "/" || m.Scope != "/" || m.Display != "standalone" {
 		t.Errorf("start_url %q scope %q display %q", m.StartURL, m.Scope, m.Display)
 	}

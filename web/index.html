@@ -36,18 +36,18 @@
   <main class="wrap">
     <section class="intro">
       <h1>print a <span class="display-serif">label</span></h1>
-      <p>zpl, pdf, png or jpeg, up to <span id="max-mb">20</span> MB. previews are drawn right here — zpl and pdfs
-        alike — then everything goes to lprint over ipp. nothing leaves the house.</p>
+      <p>zpl, pdf, png, jpeg or gif, up to <span id="max-mb">20</span> MB. previews are drawn right here — zpl, pdfs
+        and images alike — then everything goes to lprint over ipp. nothing leaves the house.</p>
     </section>
 
     <form id="form" class="card sheet" novalidate>
       <div class="drop" id="drop">
         <input type="file" id="file" name="file" class="visually-hidden"
-               accept=".zpl,.txt,.pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg,text/plain">
+               accept=".zpl,.txt,.pdf,.png,.jpg,.jpeg,.gif,application/pdf,image/png,image/jpeg,image/gif,text/plain">
         <label for="file" class="drop-target">
           <svg class="drop-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/></svg>
           <span class="drop-title">drop or paste a file here, or <span class="link">choose one</span></span>
-          <span class="label-mono">zpl · pdf · png · jpeg</span>
+          <span class="label-mono">zpl · pdf · png · jpeg · gif</span>
         </label>
       </div>
 
@@ -78,13 +78,15 @@
           <span class="field-label" id="layout-label">label area</span>
           <div class="seg" role="radiogroup" aria-labelledby="layout-label">
             <label><input type="radio" name="layout" value="auto" checked><span>auto</span></label>
-            <label><input type="radio" name="layout" value="page"><span>whole page</span></label>
+            <label><input type="radio" name="layout" value="page"><span id="layout-whole">whole page</span></label>
           </div>
         </div>
       </div>
 
       <div class="preview" id="preview" hidden>
         <div class="caption-divider">preview</div>
+        <!-- an image's size and where its ppi came from; a warning when guessed -->
+        <p class="caption image-note" id="image-note" role="status" hidden></p>
         <p class="caption" id="preview-note"></p>
         <p class="preview-warning" id="preview-warning" role="status" hidden></p>
         <div class="preview-grid" id="preview-grid"></div>

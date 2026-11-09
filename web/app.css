@@ -143,7 +143,7 @@ html[data-theme="dark"] .icon-sun, html:not([data-theme="dark"]) .icon-moon { di
 /* one label: big enough to proofread the address */
 .preview-grid:has(> .preview-item:only-child) { grid-template-columns: minmax(0, 360px); }
 /* the zpl is bigger than the labels selected: a warning, print stays enabled */
-.preview-warning {
+.preview-warning, .image-note.warn {
   margin: 0; border-radius: 8px; padding: 10px 14px; font-size: var(--fs-14); line-height: var(--lh-snug);
   background: var(--warning-soft); color: var(--warning);
 }
