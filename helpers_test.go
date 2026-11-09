@@ -100,7 +100,7 @@ func TestWriteFixtures(t *testing.T) {
 		"18-label-200ppi.png": label200ppi(t), "19-ups-doc-tab.png": upsTabPNG(t),
 		"20-screenshot.jpg": screenshotJPEG(t), "21-label.gif": labelGIF(t),
 		"22-guessed-size.png": encodePNG(t, labelBitmap(300, 300).gray()),
-		"23-barcodes.pdf":     fixBarcodes(t),
+		"23-barcodes.pdf":     fixBarcodes(t), "24-barcodes.zpl": []byte(zplBarcodesFixture),
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), pdf, 0o644); err != nil {
 			t.Fatal(err)

@@ -22,7 +22,8 @@ import (
 // barcode libraries under it are fed untrusted uploads and have no recover of
 // their own, so zpl.go's recover and timeout are what stand between a bad
 // label and a crashed server. A panic escaping render crashes this test, which
-// is the failure it exists to catch, so nothing here recovers.
+// is the failure it exists to catch, so nothing here recovers. The preview's
+// ZPL tracking parser (zplTracking) runs on every input too.
 //
 // Plain `go test` runs the seeds below as regression tests. To fuzz:
 //
@@ -49,6 +50,12 @@ func FuzzZPLPreview(f *testing.F) {
 	maxH := int(math.Ceil(maxPreviewHeightMm * float64(z.dpmm)))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
+		// the preview reads tracking numbers from the same untrusted bytes
+		for _, e := range zplTracking(data) {
+			if e.Value == "" || (e.Carrier != "UPS" && e.Carrier != "USPS" && e.Carrier != "FedEx") {
+				t.Fatalf("tracking entry %+v", e)
+			}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), z.timeout+grace)
 		defer cancel()
 		type result struct {

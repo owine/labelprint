@@ -137,3 +137,20 @@ func TestCheckEndpointClientGone(t *testing.T) {
 		t.Errorf("the handler ran %s after the client left", took)
 	}
 }
+
+// ZPL gets its tracking from the source, and no check token.
+func TestPreviewZPLTracking(t *testing.T) {
+	_, h := newTestServer(t)
+	zpl := "^XA^FO50,50^BY3^BCN,200,Y,N,N^FD>:1ZA1B2C3>54567890123^FS^XZ"
+	rec, out := post(t, h, "/api/preview", "label.zpl", []byte(zpl), nil)
+	if rec.Code != 200 {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	tr, _ := out["tracking"].([]any)
+	if len(tr) != 1 || out["check"] != nil {
+		t.Fatalf("tracking %v, check %v", out["tracking"], out["check"])
+	}
+	if e := tr[0].(map[string]any); e["carrier"] != "UPS" || e["value"] != fakeUPSDigits {
+		t.Errorf("tracking %v", e)
+	}
+}

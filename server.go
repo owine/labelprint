@@ -334,6 +334,9 @@ type previewResponse struct {
 	// images' barcode check. Absent when there's nothing to check or the
 	// labels are too big to hold.
 	Check string `json:"check,omitempty"`
+	// zpl only: tracking numbers read from the ^BC/^B3 field data, not
+	// decoded from a picture.
+	Tracking []zplTrackingEntry `json:"tracking,omitempty"`
 }
 
 func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
@@ -346,6 +349,7 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	switch up.Kind {
 	case kindZPL:
 		resp.Labels = countZPLLabels(up.Data)
+		resp.Tracking = zplTracking(up.Data)
 		media, ok := mediaSize(up.Fields["media"])
 		if !ok {
 			media, _ = mediaSize(s.cfg.DefaultMedia)
