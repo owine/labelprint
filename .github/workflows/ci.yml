@@ -186,25 +186,33 @@ jobs:
             echo "pins=$(printf '%s\n' "$pkgs" | tr '\n' ' ')"
           } >> "$GITHUB_OUTPUT"
 
-      # A pin on a package the base image already has (zlib, for a fix the
-      # 3.24 repository has before any alpine:3.24.x image does) is only needed
-      # until the base catches up. This says when it has: apk's own version
-      # order, base image vs pin. A warning, not a failure.
+      # A pin on a package the base image already has, directly or through its
+      # apk origin (e.g. openssl → libcrypto3/libssl3), is only needed until
+      # the base catches up: zlib, for a fix the 3.24 repository has before any
+      # alpine:3.24.x image does. This says when it has: every installed base
+      # package from the pin's origin, apk's own version order vs the pin. A
+      # warning, not a failure. `apk update` because `apk list <name>` for a
+      # package the base doesn't have reads the repository index.
       - name: Flag apk pins the base image already satisfies
         env:
           BASE: ${{ steps.apk.outputs.base }}
           PINS: ${{ steps.apk.outputs.pins }}
         run: |
           docker run --rm -e PINS="$PINS" "$BASE" sh -c '
+            apk update -q >/dev/null 2>&1
             for p in $PINS; do
               n=${p%%=*}; want=${p#*=}
-              have=$(apk list -I "$n" 2>/dev/null | sed -n "s/^$n-\([^ ]*\) .*/\1/p")
-              [ -n "$have" ] || continue
-              if [ "$(apk version -t "$have" "$want")" != "<" ]; then
-                echo "::warning file=Dockerfile::the base image already ships $n $have (pinned $want): drop the pin"
-              else
-                echo "$n: base has $have, pin $want still needed"
-              fi
+              origin=$(apk list "$n" 2>/dev/null | sed -n "s/^$n-[^ ]* [^ ]* {\([^}]*\)}.*/\1/p" | head -n1)
+              [ -n "$origin" ] || continue
+              apk list -I 2>/dev/null | sed -n "s/^\([^ ]*\) [^ ]* {$origin}.*/\1/p" | while read -r pkgver; do
+                have=$(printf %s "$pkgver" | sed -E "s/^.*-([^-]+-r[0-9]+)$/\1/")
+                if [ "$(apk version -t "$have" "$want")" != "<" ]; then
+                  msg="base image already ships $pkgver (origin $origin; pinned $n=$want)"
+                  echo "::warning file=Dockerfile::$msg: drop the pin"
+                else
+                  echo "$n: base has $pkgver, pin $want still needed"
+                fi
+              done
             done'
 
       - name: Build ${{ matrix.platform }}
