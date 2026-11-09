@@ -149,11 +149,18 @@ jobs:
             platform: linux/arm64
     runs-on: ${{ matrix.runner }}
     outputs:
-      # Identical on both legs unless the arches' apk indexes disagree, in
-      # which case either value still keys a rebuild correctly.
-      apk-closure: ${{ steps.apk.outputs.key }}
-      # Also identical on both legs (same Dockerfile, same base, same 3.24
-      # repository), so whichever leg's value wins is fine for apk-pin-issue.
+      # One output per platform, NOT one shared name: a matrix job's shared
+      # output is whichever leg finished last, so if the arches ever resolve
+      # different closures, push-image would build one platform with the
+      # other's key, miss this job's cache and push an image the smoke test
+      # never ran. They agree today; this guards the day they don't. Each leg
+      # sets only its own; an output that evaluates empty is not set, so the
+      # other leg's value survives.
+      apk-closure-amd64: ${{ steps.apk.outputs.key-amd64 }}
+      apk-closure-arm64: ${{ steps.apk.outputs.key-arm64 }}
+      # Identical on both legs (same Dockerfile, same base, same 3.24
+      # repository, and the check doesn't depend on the arch), so whichever
+      # leg's value wins is fine for apk-pin-issue.
       pin-findings: ${{ steps.pincheck.outputs.findings }}
       pin-check-ok: ${{ steps.pincheck.outputs.ok }}
     steps:
@@ -170,6 +177,8 @@ jobs:
       # carry through.
       - name: Compute apk closure cache key
         id: apk
+        env:
+          PLATFORM: ${{ matrix.platform }}
         run: |
           base=$(awk '/^FROM /{img=$2} END{print img}' Dockerfile)
           pkgs=$(awk '/^FROM /{n=0; on=0}
@@ -183,9 +192,18 @@ jobs:
           # shellcheck disable=SC2086 # word-split the pin list on purpose
           closure=$(docker run --rm "$base" apk add --simulate --no-cache $pkgs \
             | sed -nE 's/^\( *[0-9]+\/[0-9]+\) (Installing|Upgrading) //p' | sort)
+          # An empty closure (apk's output format changed) would hash to a
+          # constant key and quietly turn the rebuild off.
+          if [ -z "$closure" ]; then
+            echo "::error::apk add --simulate listed no packages"
+            exit 1
+          fi
           echo "$closure"
+          key=$(printf '%s\n' "$closure" | sha256sum | cut -d' ' -f1)
+          echo "$(printf '%s\n' "$closure" | wc -l) packages, key $key"
           {
-            echo "key=$(printf '%s\n' "$closure" | sha256sum | cut -d' ' -f1)"
+            echo "key=$key"
+            echo "key-${PLATFORM#linux/}=$key"
             echo "base=$base"
             echo "pins=$(printf '%s\n' "$pkgs" | tr '\n' ' ')"
           } >> "$GITHUB_OUTPUT"
@@ -380,6 +398,28 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
 
+      - name: Pick this platform's apk closure key
+        id: apk
+        # docker-build's key for this platform, not a fresh one: the index may
+        # have moved since, and a different key would rebuild the layer
+        # instead of reusing the one the smoke test ran.
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          KEY_AMD64: ${{ needs.docker-build.outputs.apk-closure-amd64 }}
+          KEY_ARM64: ${{ needs.docker-build.outputs.apk-closure-arm64 }}
+        run: |
+          case "$PLATFORM" in
+            linux/amd64) key=$KEY_AMD64 ;;
+            linux/arm64) key=$KEY_ARM64 ;;
+            *) key= ;;
+          esac
+          if [ -z "$key" ]; then
+            echo "::error::docker-build left no apk closure key for $PLATFORM"
+            exit 1
+          fi
+          echo "$PLATFORM: apk closure key $key"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
       - name: Log in to GHCR
         uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550  # v4.8.0
         with:
@@ -393,7 +433,7 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          build-args: APK_CLOSURE=${{ needs.docker-build.outputs.apk-closure }}
+          build-args: APK_CLOSURE=${{ steps.apk.outputs.key }}
           cache-from: type=gha,scope=docker-${{ matrix.platform }}
           labels: org.opencontainers.image.revision=${{ github.sha }}
           provenance: mode=max
