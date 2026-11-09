@@ -411,12 +411,13 @@ func (s *server) labelOpts(fields map[string]string, doc *pdfDoc, pages []int, m
 	if err != nil {
 		return labelOpts{}, err
 	}
-	crops, err := parseCrops(fields["crops"], pages, func(p int) (float64, float64) { return doc.geom(p).inches() }, doc.noun)
+	crops, flips, err := parseCrops(fields["crops"], pages, func(p int) (float64, float64) { return doc.geom(p).inches() }, doc.noun)
 	if err != nil {
 		return labelOpts{}, err
 	}
 	media, ok := s.mediaFor(mediaName)
-	return labelOpts{layout: layout, crops: crops, media: media, known: ok, canvas: canvasFor(media, ok, s.cfg.DPI)}, nil
+	return labelOpts{layout: layout, crops: crops, flips: flips, media: media, known: ok,
+		canvas: canvasFor(media, ok, s.cfg.DPI)}, nil
 }
 
 // docSource is what openPDF opens: an uploaded pdf, or an uploaded image to

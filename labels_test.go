@@ -463,7 +463,7 @@ func TestFallbackBoxCanBeUnderTheCropMinimum(t *testing.T) {
 		t.Fatalf("page 2: skip %v, boxes %+v; want one skipped box under %g in tall", pl.Skip, pl.Boxes, minBoxIn)
 	}
 	b := pl.Boxes[0].round4()
-	if _, err := parseCrops(fmt.Sprintf(`{"2": [[%g, %g, %g, %g]]}`, b.X, b.Y, b.W, b.H), []int{2},
+	if _, _, err := parseCrops(fmt.Sprintf(`{"2": [[%g, %g, %g, %g]]}`, b.X, b.Y, b.W, b.H), []int{2},
 		func(int) (float64, float64) { return 8.5, 11 }, docNoun{}); err == nil {
 		t.Error("sent as it is, the box should be refused")
 	}

@@ -20,10 +20,11 @@ type pagePlan struct {
 
 // labelOpts is how boxes are chosen and what they're drawn onto.
 type labelOpts struct {
-	layout string        // "auto" or "page"
-	crops  map[int][]box // the user's boxes per page; they win over layout
-	media  labelSize     // for detection
-	known  bool          // media is a real size
+	layout string         // "auto" or "page"
+	crops  map[int][]box  // the user's boxes per page; they win over layout
+	flips  map[int][]bool // indexed like crops: which boxes' labels to flip 180°; nil when none is
+	media  labelSize      // for detection
+	known  bool           // media is a real size
 	canvas canvas
 }
 

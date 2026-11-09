@@ -449,6 +449,24 @@ func TestPreviewPDF(t *testing.T) {
 	}
 }
 
+// labelOpts hands the flips parseCrops read on to plan, and has none when
+// the crops flip nothing.
+func TestLabelOptsCarriesFlips(t *testing.T) {
+	_, s := newTestServerS(t)
+	doc := openTest(t, makeLabelPDF(2))
+	o, err := s.labelOpts(map[string]string{"crops": `{"2": [[0, 0, 1, 1, 1]]}`}, doc, []int{1, 2}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(o.flips); got != "map[2:[true]]" || len(o.crops[2]) != 1 {
+		t.Errorf("flips %s, crops %v; want map[2:[true]] and one box", got, o.crops)
+	}
+	o, err = s.labelOpts(map[string]string{"crops": `{"2": [[0, 0, 1, 1]]}`}, doc, []int{1, 2}, "")
+	if err != nil || o.flips != nil {
+		t.Errorf("nothing flipped: flips %v err %v; want nil", o.flips, err)
+	}
+}
+
 func TestPreviewNativeAndCrops(t *testing.T) {
 	requirePoppler(t)
 	_, h := newTestServer(t)
