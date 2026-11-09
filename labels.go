@@ -14,9 +14,14 @@ type pagePlan struct {
 	Fallback bool   // detection found nothing label-sized
 	Boxes    []box  // in print order
 	Tabs     []*box // auto only, parallel to Boxes; nil when no box has a doc tab
+	Flips    []bool // crops only, parallel to Boxes: labels to flip 180°; nil when none is
 	Skip     bool   // auto fallback page while another selected page has labels: left out unless the user includes it
 	Failed   bool   // auto: detection couldn't run (its render failed or was unreadable), so this is the fallback
 }
+
+// flip reports whether box i's label is flipped 180°. Flips is nil for auto,
+// fallback and whole-page plans.
+func (p pagePlan) flip(i int) bool { return i < len(p.Flips) && p.Flips[i] }
 
 // labelOpts is how boxes are chosen and what they're drawn onto.
 type labelOpts struct {
@@ -66,7 +71,7 @@ func (d *pdfDoc) plan(ctx context.Context, pages []int, o labelOpts) ([]pagePlan
 	out := make([]pagePlan, 0, len(pages))
 	for _, p := range pages {
 		if c, ok := o.crops[p]; ok {
-			out = append(out, pagePlan{Page: p, Boxes: c})
+			out = append(out, pagePlan{Page: p, Boxes: c, Flips: o.flips[p]})
 			continue
 		}
 		if o.layout == "page" {
@@ -135,17 +140,26 @@ func (d *pdfDoc) detectPage(ctx context.Context, page int, png []byte, o labelOp
 }
 
 // label makes one box's label: path A when it applies, path B otherwise.
-func (d *pdfDoc) label(ctx context.Context, page int, b box, o labelOpts) (labelImg, error) {
+// flip turns the finished label 180°, after either path, so matching, fitting
+// and scaling never see it. A turn loses nothing: a native label is still its
+// bitmap's own pixels, and a centred one is still centred to within a dot.
+func (d *pdfDoc) label(ctx context.Context, page int, b box, flip bool, o labelOpts) (labelImg, error) {
+	l := labelImg{Method: "native", Scale: 1}
 	g, ppi, reason := d.native(ctx, page, b, o.canvas)
 	if g != nil {
-		png, err := encodeGray(g)
-		return labelImg{PNG: png, Method: "native", PPI: ppi, Scale: 1}, err
+		l.PPI = ppi
+	} else {
+		d.r.log.Debug("passthrough not used", "page", page, "reason", reason)
+		var err error
+		if g, l.Scale, err = d.renderLabel(ctx, page, b, o.canvas); err != nil {
+			return labelImg{}, err
+		}
+		l.Method = "render"
 	}
-	d.r.log.Debug("passthrough not used", "page", page, "reason", reason)
-	g, scale, err := d.renderLabel(ctx, page, b, o.canvas)
-	if err != nil {
-		return labelImg{}, err
+	if flip {
+		g = rotate(g, 2)
 	}
-	png, err := encodeGray(g)
-	return labelImg{PNG: png, Method: "render", Scale: scale}, err
+	var err error
+	l.PNG, err = encodeGray(g)
+	return l, err
 }

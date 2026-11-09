@@ -526,7 +526,7 @@ func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewRespon
 			if budget == 0 || pl.Skip { // a skipped page's box isn't printing, so it gets no image
 				break
 			}
-			l, err := doc.label(ctx, pl.Page, b, o)
+			l, err := doc.label(ctx, pl.Page, b, pl.flip(i), o)
 			if err != nil {
 				return nil, &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
 			}
@@ -754,7 +754,7 @@ func (s *server) pdfJobs(ctx context.Context, up *upload, base printRequest, med
 			continue
 		}
 		for i, b := range pl.Boxes {
-			l, err := doc.label(ctx, pl.Page, b, o)
+			l, err := doc.label(ctx, pl.Page, b, pl.flip(i), o)
 			if err != nil {
 				return nil, nil, &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
 			}
