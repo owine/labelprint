@@ -2,6 +2,7 @@ package main
 
 import (
 	"image"
+	"math/rand/v2"
 	"slices"
 	"testing"
 
@@ -267,5 +268,51 @@ func TestHalve(t *testing.T) {
 	// (0+255+255+0)/4, (100+100)/2, (50+50)/2, 7
 	if want := []uint8{128, 100, 50, 7}; !slices.Equal(h.Pix, want) {
 		t.Errorf("%v, want %v", h.Pix, want)
+	}
+}
+
+// ---------------------------------------------------------------- cost
+
+// noisyLabel is the benchmark's worst case: barcodes that never stop the
+// passes early (postal routing and a reference number), lines of glyph-like
+// marks, and a block of random dots like a MaxiCode's.
+func noisyLabel(tb testing.TB) *image.Gray {
+	g := label4x6()
+	r := rand.New(rand.NewPCG(9, 9))
+	for line := range 16 {
+		y := 30 + line*26
+		for x := 30; x < 780; x += 9 {
+			if r.IntN(5) == 0 {
+				continue // a space
+			}
+			for range 6 {
+				px, py := x+r.IntN(7), y+r.IntN(16)
+				g.Pix[py*g.Stride+px], g.Pix[py*g.Stride+px+1] = 0, 0
+			}
+		}
+	}
+	for y := 470; y < 650; y += 6 {
+		for x := 560; x < 760; x += 6 {
+			if r.IntN(2) == 0 {
+				for dy := range 5 {
+					for dx := range 5 {
+						g.Pix[(y+dy)*g.Stride+x+dx] = 0
+					}
+				}
+			}
+		}
+	}
+	drawBars(g, code128(tb, gs1Routing), 40, 680, 3, 150, false)
+	drawBars(g, code128(tb, "123456789012"), 40, 900, 3, 200, false)
+	return g
+}
+
+func BenchmarkDecodeLabel(b *testing.B) {
+	g := noisyLabel(b)
+	if got := decodeLabel(g); got.Status != checkReads {
+		b.Fatalf("worst case is %+v, want reads: an early stop would make this the best case", got)
+	}
+	for b.Loop() {
+		decodeLabel(g)
 	}
 }
