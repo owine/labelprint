@@ -301,7 +301,7 @@ func TestShareRejects(t *testing.T) {
 		status   int    // JSON
 		code     string // redirect's share-error
 	}{
-		{"gif", "x.gif", []byte("GIF89a......"), 0, 415, "unsupported"},
+		{"bmp", "x.bmp", []byte("BM......"), 0, 415, "unsupported"},
 		{"plain text", "notes.txt", []byte("hello"), 0, 415, "unsupported"},
 		{"too big", "big.zpl", bytes.Repeat([]byte("^XA^XZ"), 400), 1024, 413, "too-big"},
 		{"empty", "a.zpl", nil, 0, 400, "unreadable"},

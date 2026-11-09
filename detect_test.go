@@ -37,7 +37,9 @@ func TestDetectKind(t *testing.T) {
 		{"no-extension", "\r\n%PDF-1.4 junk before header", kindPDF, 0},
 		{"x.png", "\x89PNG\r\n\x1a\nrest", kindPNG, 0},
 		{"x.jpg", "\xff\xd8\xff\xe0rest", kindJPEG, 0},
-		{"x.gif", "GIF89a....", "", 415},
+		{"x.gif", "GIF89a....", kindGIF, 0}, // decoding comes later (imagepdf.go)
+		{"x.gif", "GIF87a....", kindGIF, 0},
+		{"x.bmp", "BM....", "", 415},
 		{"empty.zpl", "", "", 400},
 		// EPL2 is refused, whatever it is called; ZPL and plain text are not caught by it.
 		{"label.epl", epl2Sample, "", 415},
