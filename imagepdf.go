@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"image"
 	"image/color"
 	_ "image/gif" // GIF uploads; bitmap.go registers PNG and JPEG
+	"math"
 	"net/http"
 )
 
@@ -282,3 +284,121 @@ func flatten(img image.Image, w, h int) *image.Gray {
 }
 
 func be16(p []uint8) uint32 { return uint32(p[0])<<8 | uint32(p[1]) }
+
+// ---------------------------------------------------------------- size and ppi
+
+// checkImageSize refuses an image that can't make a label at its ppi: one
+// whose render at the printer's dpi would be over maxRenderPx (checkRender's
+// sums for the whole page, as renderBoxAt does them), or one under 0.5 in on a
+// side, which couldn't hold a box the page can draw.
+func checkImageSize(w, h int, ppi float64, dpi int) error {
+	f := float64(dpi) / ppi
+	if err := checkRender("that image", math.Ceil(float64(w)*f)+1, math.Ceil(float64(h)*f)+1); err != nil {
+		return err
+	}
+	if float64(w)/ppi < minImageIn || float64(h)/ppi < minImageIn {
+		return errImageTooSmall
+	}
+	return nil
+}
+
+// imagePPI is the image's resolution, which only sets its size in inches:
+// the file's own density when it's plausible, else what makes it the
+// media's size (or the media plus a 1 in doc tab), else the printer's dpi.
+// Every ppi but the default is rounded to 0.1.
+func imagePPI(data []byte, kind docKind, w, h int, media labelSize, mediaOK bool, dpi int) (float64, string) {
+	switch kind {
+	case kindPNG:
+		if v, ok := pngPPI(data); ok {
+			return v, "phys"
+		}
+	case kindJPEG:
+		if v, ok := jfifPPI(data); ok {
+			return v, "jfif"
+		}
+	}
+	if mediaOK && media.WidthMm > 0 && media.HeightMm > 0 {
+		long, short := float64(max(w, h)), float64(min(w, h))
+		mLong, mShort := max(media.WidthMm, media.HeightMm)/25.4, min(media.WidthMm, media.HeightMm)/25.4
+		for _, m := range []struct {
+			tab float64
+			src string
+		}{{0, "media"}, {1, "media+tab"}} {
+			l := mLong + m.tab
+			if math.Abs((long/short)/(l/mShort)-1) > aspectTolerance {
+				continue
+			}
+			if ppi := round1(long / l); ppi >= ppiMatchMin && ppi <= ppiMatchMax {
+				return ppi, m.src
+			}
+		}
+	}
+	return float64(dpi), "default"
+}
+
+func round1(v float64) float64 { return math.Round(v*10) / 10 }
+
+func plausiblePPI(v float64) (float64, bool) {
+	v = round1(v)
+	return v, v >= ppiMetaMin && v <= ppiMetaMax
+}
+
+// pngPPI reads a pHYs chunk (image/png doesn't expose it): pixels per metre,
+// x and y within 1% of each other.
+func pngPPI(data []byte) (float64, bool) {
+	for i := 8; i+12 <= len(data); {
+		n := int(binary.BigEndian.Uint32(data[i:]))
+		typ := string(data[i+4 : i+8])
+		if n < 0 || n > len(data)-i-12 || typ == "IDAT" || typ == "IEND" {
+			break // pHYs must come before the image data
+		}
+		if typ == "pHYs" && n == 9 {
+			p := data[i+8:]
+			x, y := float64(binary.BigEndian.Uint32(p)), float64(binary.BigEndian.Uint32(p[4:]))
+			if p[8] != 1 || x <= 0 || y <= 0 || math.Abs(x-y) > 0.01*max(x, y) {
+				return 0, false
+			}
+			return plausiblePPI(x * 0.0254)
+		}
+		i += 12 + n
+	}
+	return 0, false
+}
+
+// jfifPPI reads the JFIF APP0 density: dots per inch (units 1) or per cm
+// (units 2), x equal to y.
+func jfifPPI(data []byte) (float64, bool) {
+	for i := 2; i+4 <= len(data); {
+		if data[i] != 0xFF {
+			return 0, false
+		}
+		m := data[i+1]
+		if m == 0xFF { // a fill byte
+			i++
+			continue
+		}
+		if m == 0xDA || m == 0xD9 {
+			return 0, false
+		}
+		n := int(binary.BigEndian.Uint16(data[i+2:]))
+		if n < 2 || i+2+n > len(data) {
+			return 0, false
+		}
+		if p := data[i+4 : i+2+n]; m == 0xE0 && len(p) >= 12 && string(p[:5]) == "JFIF\x00" {
+			units := p[7]
+			x, y := binary.BigEndian.Uint16(p[8:]), binary.BigEndian.Uint16(p[10:])
+			if x != y || x == 0 {
+				return 0, false
+			}
+			switch units {
+			case 1:
+				return plausiblePPI(float64(x))
+			case 2:
+				return plausiblePPI(float64(x) * 2.54)
+			}
+			return 0, false
+		}
+		i += 2 + n
+	}
+	return 0, false
+}

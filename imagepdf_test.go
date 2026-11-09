@@ -101,6 +101,25 @@ func pngHeader(w, h uint32, depth, colorType, interlace byte, extra ...[]byte) [
 	return slices.Concat(append([][]byte{[]byte("\x89PNG\r\n\x1a\n"), pngChunk("IHDR", ihdr)}, extra...)...)
 }
 
+// physChunk is a pHYs chunk: x and y pixels per unit (1: metre).
+func physChunk(x, y uint32, unit byte) []byte {
+	p := binary.BigEndian.AppendUint32(nil, x)
+	p = binary.BigEndian.AppendUint32(p, y)
+	return pngChunk("pHYs", append(p, unit))
+}
+
+// withPHYs splices a pHYs chunk in after the IHDR: Go's encoder writes none.
+func withPHYs(data []byte, ppm uint32) []byte {
+	const ihdrEnd = 8 + 4 + 4 + 13 + 4
+	return slices.Concat(data[:ihdrEnd], physChunk(ppm, ppm, 1), data[ihdrEnd:])
+}
+
+// withJFIF splices a JFIF APP0 in after the SOI: Go's encoder writes none.
+func withJFIF(data []byte, units byte, x, y uint16) []byte {
+	app0 := []byte{0xFF, 0xE0, 0, 16, 'J', 'F', 'I', 'F', 0, 1, 2, units, byte(x >> 8), byte(x), byte(y >> 8), byte(y), 0, 0}
+	return slices.Concat(data[:2], app0, data[2:])
+}
+
 // jpegScan is one scan of a hand-built JPEG: the components it codes (0-based)
 // and its spectral selection and successive approximation.
 type jpegScan struct {
@@ -487,5 +506,65 @@ func TestDecodeLiveHeap(t *testing.T) {
 				t.Errorf("%d square: live heap grew %.1f MB, over the %.1f MB estimate", s, grew/1e6, estimate/1e6)
 			}
 		})
+	}
+}
+
+// ---------------------------------------------------------------- ppi
+
+func TestImagePPI(t *testing.T) {
+	m46, _ := mediaSize("na_index-4x6_4x6in")
+	gray := func(w, h int) []byte { return encodePNG(t, image.NewGray(image.Rect(0, 0, w, h))) }
+	jpg := encodeJPEG(t, image.NewGray(image.Rect(0, 0, 300, 300)))
+	cases := []struct {
+		name    string
+		data    []byte
+		kind    docKind
+		w, h    int
+		mediaOK bool
+		ppi     float64
+		src     string
+	}{
+		{"pHYs 7874 ppm", withPHYs(gray(800, 1200), 7874), kindPNG, 800, 1200, true, 200, "phys"},
+		{"pHYs 11811 ppm", withPHYs(gray(300, 300), 11811), kindPNG, 300, 300, true, 300, "phys"},
+		{"pHYs 3937 ppm is 100.0: in", withPHYs(gray(300, 300), 3937), kindPNG, 300, 300, false, 100, "phys"},
+		{"pHYs 23622 ppm is 600.0: in", withPHYs(gray(300, 300), 23622), kindPNG, 300, 300, false, 600, "phys"},
+		{"pHYs 23630 ppm is 600.2: out", withPHYs(gray(300, 300), 23630), kindPNG, 300, 300, false, 203, "default"},
+		{"pHYs unit unknown", slices.Concat(gray(300, 300)[:33], physChunk(7874, 7874, 0), gray(300, 300)[33:]),
+			kindPNG, 300, 300, false, 203, "default"},
+		{"pHYs x and y disagree", slices.Concat(gray(300, 300)[:33], physChunk(7874, 8200, 1), gray(300, 300)[33:]),
+			kindPNG, 300, 300, false, 203, "default"},
+		{"pHYs 2835 ppm (72)", withPHYs(gray(300, 300), 2835), kindPNG, 300, 300, false, 203, "default"},
+		{"JFIF 203 dpi", withJFIF(jpg, 1, 203, 203), kindJPEG, 300, 300, false, 203, "jfif"},
+		{"JFIF 80 dots/cm", withJFIF(jpg, 2, 80, 80), kindJPEG, 300, 300, false, 203.2, "jfif"},
+		{"JFIF 96", withJFIF(jpg, 1, 96, 96), kindJPEG, 300, 300, false, 203, "default"},
+		{"JFIF aspect only", withJFIF(jpg, 0, 1, 1), kindJPEG, 300, 300, false, 203, "default"},
+		{"800×1200 on 4×6", gray(800, 1200), kindPNG, 800, 1200, true, 200, "media"},
+		{"812×1218", gray(812, 1218), kindPNG, 812, 1218, true, 203, "media"},
+		{"1200×1800", gray(1200, 1800), kindPNG, 1200, 1800, true, 300, "media"},
+		{"384×576", gray(384, 576), kindPNG, 384, 576, true, 96, "media"},
+		{"1400×800 (a 1 in doc tab)", gray(1400, 800), kindPNG, 1400, 800, true, 200, "media+tab"},
+		{"an odd aspect", gray(300, 300), kindPNG, 300, 300, true, 203, "default"},
+		{"unknown media", gray(800, 1200), kindPNG, 800, 1200, false, 203, "default"},
+		{"a match under 50 ppi", gray(160, 240), kindPNG, 160, 240, true, 203, "default"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ppi, src := imagePPI(c.data, c.kind, c.w, c.h, m46, c.mediaOK, 203)
+			if math.Abs(ppi-c.ppi) > 1e-9 || src != c.src {
+				t.Errorf("ppi %g (%s), want %g (%s)", ppi, src, c.ppi, c.src)
+			}
+		})
+	}
+}
+
+func TestCheckImageSizeAtItsPPI(t *testing.T) {
+	// 4000 px at 120 ppi is 33.3 in: about 45.8 Mpx at 203 dpi
+	wantUserError(t, checkImageSize(4000, 4000, 120, 203), 422, "that image is too large to print as a label")
+	wantUserError(t, checkImageSize(40, 40, 203, 203), 422, "that image is too small to print as a label")
+	wantUserError(t, checkImageSize(800, 100, 203, 203), 422, "that image is too small to print as a label")
+	for _, ok := range [][3]float64{{800, 1200, 200}, {102, 102, 203}, {3000, 3000, 203}} {
+		if err := checkImageSize(int(ok[0]), int(ok[1]), ok[2], 203); err != nil {
+			t.Errorf("%v: %v", ok, err)
+		}
 	}
 }
