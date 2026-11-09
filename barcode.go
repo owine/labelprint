@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"image"
+	"image/png"
 	"slices"
 
 	"github.com/makiuchi-d/gozxing"
@@ -159,4 +161,70 @@ func formatName(f gozxing.BarcodeFormat) string {
 		return "qr"
 	}
 	return "other"
+}
+
+// checkLabelPNG checks one label PNG. Its size is read from the header
+// first, so an image too small to hold a barcode is refused before it's
+// decoded; then checkGray.
+func checkLabelPNG(data []byte, decode func(*image.Gray) labelCheck) labelCheck {
+	cfg, err := png.DecodeConfig(bytes.NewReader(data))
+	if err != nil || cfg.Width < minCheckSide || cfg.Height < minCheckSide {
+		return labelCheck{Status: checkError}
+	}
+	img, err := png.Decode(bytes.NewReader(data))
+	if err != nil {
+		return labelCheck{Status: checkError}
+	}
+	return checkGray(toGray(img), decode)
+}
+
+// checkGray checks a decoded label. A panic in decode is an error, never a
+// crash, and its value is dropped: it can quote what was being decoded. An
+// image over maxRenderPx (a long roll at a high RENDER_DPI) is halved by
+// area averaging until it fits: a large canvas is legitimate, never an
+// error. After two halvings or more, nothing found means "didn't finish",
+// not "no barcode": that much shrinking can make a good label unreadable.
+func checkGray(g *image.Gray, decode func(*image.Gray) labelCheck) (c labelCheck) {
+	defer func() {
+		if recover() != nil {
+			c = labelCheck{Status: checkError, panicked: true}
+		}
+	}()
+	if g.Rect.Dx() < minCheckSide || g.Rect.Dy() < minCheckSide {
+		return labelCheck{Status: checkError}
+	}
+	g = toGray(g) // origin at 0,0, which halve relies on
+	halvings := 0
+	for g.Rect.Dx()*g.Rect.Dy() > maxRenderPx {
+		g = halve(g)
+		halvings++
+	}
+	c = decode(g)
+	if halvings >= 2 && c.Status == checkNone {
+		c.Status = checkTimedOut
+	}
+	return c
+}
+
+// halve shrinks g to half each way, each pixel the mean of the 2×2 (or, at
+// an odd edge, smaller) block it covers.
+func halve(g *image.Gray) *image.Gray {
+	w, h := g.Rect.Dx(), g.Rect.Dy()
+	out := image.NewGray(image.Rect(0, 0, (w+1)/2, (h+1)/2))
+	for y := range out.Rect.Dy() {
+		for x := range out.Rect.Dx() {
+			sum, n := 0, 0
+			for dy := range 2 {
+				for dx := range 2 {
+					sx, sy := 2*x+dx, 2*y+dy
+					if sx < w && sy < h {
+						sum += int(g.Pix[sy*g.Stride+sx])
+						n++
+					}
+				}
+			}
+			out.Pix[y*out.Stride+x] = uint8((sum + n/2) / n)
+		}
+	}
+	return out
 }

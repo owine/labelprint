@@ -193,3 +193,79 @@ func TestDecodeLabel(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------- bounds
+
+func TestCheckRefusesTinyImages(t *testing.T) {
+	never := func(*image.Gray) labelCheck {
+		t.Error("the decoder was called")
+		return labelCheck{Status: checkOK}
+	}
+	if got := checkGray(image.NewGray(image.Rect(0, 0, 0, 0)), never); got.Status != checkError {
+		t.Errorf("0×0: %+v", got)
+	}
+	for _, side := range []int{1, 7} {
+		if got := checkLabelPNG(encodePNG(t, newWhite(side, side)), never); got.Status != checkError {
+			t.Errorf("%d×%d: %+v", side, side, got)
+		}
+	}
+	if got := checkLabelPNG(encodePNG(t, newWhite(8, 7)), never); got.Status != checkError {
+		t.Errorf("8×7: %+v", got)
+	}
+	if got := checkLabelPNG([]byte("not a png"), never); got.Status != checkError {
+		t.Errorf("not a png: %+v", got)
+	}
+	called := false
+	checkLabelPNG(encodePNG(t, newWhite(8, 8)), func(*image.Gray) labelCheck { called = true; return labelCheck{Status: checkNone} })
+	if !called {
+		t.Error("8×8 wasn't decoded")
+	}
+}
+
+// A canvas over maxRenderPx is legitimate (a long roll at a high dpi): it's
+// halved until it fits and checked, never refused.
+func TestCheckDownscalesLargeCanvas(t *testing.T) {
+	g := newWhite(4000, 5000) // 20 Mpx
+	drawBars(g, code128(t, fakeUPS), 100, 2500, 6, 400, false)
+	var size image.Point
+	got := checkGray(g, func(h *image.Gray) labelCheck { size = h.Rect.Size(); return decodeLabel(h) })
+	if size != image.Pt(2000, 2500) {
+		t.Errorf("decoded at %v, want 2000×2500", size)
+	}
+	if got.Status != checkOK || got.Tracking != fakeUPS {
+		t.Errorf("got %+v", got)
+	}
+}
+
+// Two halvings or more and nothing found: "didn't finish", since that much
+// shrinking can lose a good barcode. One halving and nothing found is still
+// "no barcode".
+func TestCheckHalvedTwiceNoneIsTimeout(t *testing.T) {
+	none := func(*image.Gray) labelCheck { return labelCheck{Status: checkNone} }
+	if got := checkGray(newWhite(4000, 5000), none); got.Status != checkNone {
+		t.Errorf("one halving: %+v", got)
+	}
+	if got := checkGray(newWhite(8200, 8000), none); got.Status != checkTimedOut {
+		t.Errorf("two halvings: %+v", got)
+	}
+}
+
+func TestCheckRecoversDecoderPanic(t *testing.T) {
+	got := checkLabelPNG(encodePNG(t, label4x6()), func(*image.Gray) labelCheck { panic("decoded 1ZSECRET") })
+	if got.Status != checkError || !got.panicked || got.Tracking != "" {
+		t.Errorf("got %+v", got)
+	}
+}
+
+func TestHalve(t *testing.T) {
+	g := image.NewGray(image.Rect(0, 0, 3, 3))
+	copy(g.Pix, []uint8{0, 255, 100, 255, 0, 100, 50, 50, 7})
+	h := halve(g)
+	if h.Rect.Dx() != 2 || h.Rect.Dy() != 2 {
+		t.Fatalf("%v", h.Rect)
+	}
+	// (0+255+255+0)/4, (100+100)/2, (50+50)/2, 7
+	if want := []uint8{128, 100, 50, 7}; !slices.Equal(h.Pix, want) {
+		t.Errorf("%v, want %v", h.Pix, want)
+	}
+}
