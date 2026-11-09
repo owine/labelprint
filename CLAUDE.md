@@ -16,11 +16,12 @@ example stack. The repo is public: keep real hostnames, addresses and deployment
 | file | role |
 |---|---|
 | `ipp.go` | hand-written IPP/2.0 encoder/decoder and the four operations used: Print-Job, Cancel-Job, Get-Printer-Attributes, Get-Jobs |
-| `detect.go` | content sniffing (PDF/PNG/JPEG magic, ZPL by `.zpl` or `^XA…^XZ`), page-range parsing |
+| `detect.go` | content sniffing (PDF/PNG/JPEG/GIF magic, ZPL by `.zpl` or `^XA…^XZ`), page-range parsing |
 | `render.go` | `pdfinfo`/`pdftoppm` wrapper: page geometry, page and box renders, path B (render to the label's dots), scratch files on the `/tmp` tmpfs |
 | `geom.go` | `box` (fractions of the page as displayed), page geometry, the pdftohtml offset table, `crops`/`layout` parsing |
 | `crop.go` | label detection on a 50 dpi ink mask: XY-cut, label-sized test, frame stripping, UPS doc-tab split |
 | `native.go` | path A: embedded bitmaps printed 1:1 (pdfimages gate, pdftohtml positions, verified against a render) |
+| `imagepdf.go` | images: header checks before decoding (side, JPEG scan count, decode-memory estimate), the ppi rule, decode to gray on white, and a minimal one-page PDF writer, so PNG/JPEG/GIF run through the PDF pipeline as page 1 |
 | `labels.go` | per page: which boxes (and the skip rule), and each box's label (path A, else B) |
 | `bitmap.go` | gray-image helpers: threshold, rotate, trim, centre |
 | `zpl.go` | ZPL preview via zebrash (the only module dependency, `github.com/Gobbo89/zebrash`): panic recovery, timeout, canvas from `^PW`/`^LL` or the media |
@@ -38,11 +39,12 @@ Verified against the live LPrint (Get-Printer-Attributes) and the LPrint/PAPPL s
 
 - LPrint accepts `application/vnd.zebra-zpl`, `image/png`, `image/jpeg`, `image/pwg-raster`, `image/urf`. **No PDF**,
   so PDFs are rasterised here.
-- `multiple-document-jobs-supported = false`, so it's one Print-Job per PDF label.
+- `multiple-document-jobs-supported = false`, so it's one Print-Job per label.
 - `page-ranges` isn't a job-creation attribute, so ranges are applied at render time.
 - LPrint's ZPL driver (`lprint_zpl_printfile`) copies raw data through once and **ignores `copies`**. ZPL copies are
   made by repeating the document in a single job. Don't "fix" this by sending `copies`.
-- PAPPL's image path does honour `copies`, `print-scaling` and auto-rotation, so PNG/JPEG/PDF pages rely on them.
+- PAPPL's image path does honour `copies`, `print-scaling` and auto-rotation, so the PNG labels made from PDFs and images rely on
+  them.
 - PDF labels are thresholded to pure black/white at the printer's dots, so PAPPL's dither never sees gray.
 - Labels never enlarge: path B scales by `min(1, fit)` and path A is 1:1. Carriers ask for true size. The page warns
   when a label shrinks below 95% / 87%.
@@ -55,6 +57,10 @@ Verified against the live LPrint (Get-Printer-Attributes) and the LPrint/PAPPL s
   Verification is local (a sliding window, plus a check for stray ink beside the image), runs at the image's own
   resolution, and refuses when anything else is drawn in the box (e.g. a generator's logo over the bitmap). That's on
   purpose: falling back to a render is safe, printing hidden content is not.
+- Images are wrapped as one-page PDFs, and decoded inside the pipeline slot and the request deadline. Go's image
+  decoders trust the header and never check a context, so `checkImage` refuses before decoding: over 4000 px a
+  side, over 64 JPEG scans (counted as `FF (FF)* DA` byte sequences, not parsed), or a header-based memory
+  estimate over 96 MB. The Dockerfile sets `GOMEMLIMIT`. Keep all of them.
 - pdftohtml clamps `-zoom` to 3 and reports positions relative to the MediaBox (see `htmlOffset`).
 - Logs carry no poppler output or label text, only page numbers and fixed reasons.
 - zebrash is the [Gobbo89 fork](https://github.com/Gobbo89/zebrash): upstream
@@ -82,8 +88,10 @@ Never send to port 9100 directly. Every job must go through LPrint so it appears
 
 Labels contain names and addresses. Don't add any outside service (Labelary etc.) for rendering or previews;
 ZPL previews use zebrash in-process for exactly this reason. Don't log
-filenames or document contents (logs carry kind, size, copies, media and job ids only), and never commit real label
-files (`.gitignore` blocks `*.zpl` outside `testdata/`). The page loads nothing third-party; the CSP is
+filenames or document contents (logs carry
+kind, size, copies, media, an image's ppi and ppi source, and job ids only), and never commit real label
+files (`.gitignore` blocks `*.zpl`, `*.pdf`, `*.png`, `*.jpg`,
+`*.jpeg` and `*.gif` outside `testdata/`, the app icons excepted). The page loads nothing third-party; the CSP is
 `default-src 'self'`.
 
 ## The iOS Shortcut
@@ -125,7 +133,7 @@ Lint like CI: `gofmt -l .`, `go vet ./...`, hadolint on `Dockerfile`, `yamllint 
 
 - `ci.yml`: lint and `go test`, then `docker-build` builds each arch on a native runner (`ubuntu-26.04` and
   `ubuntu-26.04-arm`) and smoke-tests it hardened: refuses to start without `LPRINT_URI`, read-only, no caps,
-  non-root, PDF and ZPL render, font substitution, cross-site POST refused. The Trivy HIGH/CRITICAL gate runs before
+  non-root, PDF, image and ZPL render, font substitution, cross-site POST refused. The Trivy HIGH/CRITICAL gate runs before
   anything is pushed. On `main`, `push-image` pushes each arch by digest, `publish-image` joins them and tags
   `:sha-<long>` (and `:main` if still head), and `code-scanning` uploads Trivy's full SARIF report. Jobs that run PR
   code hold no write token. Keep the matrix `runner:` lines in their one-line shape; Renovate's `github-runners`

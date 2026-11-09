@@ -1,6 +1,6 @@
 # labelprint
 
-A one-page web app for printing shipping labels on a Zebra label printer. Drop in a ZPL, PDF, PNG or JPEG file
+A one-page web app for printing shipping labels on a Zebra label printer. Drop in a ZPL, PDF, PNG, JPEG or GIF file
 (or paste one, or a screenshot), check the preview, pick copies and a label size, and press print. The page remembers
 the label size and copies in your browser; copies go back to 1 after each successful print. Every job goes to
 [LPrint](https://www.msweet.org/lprint/) over IPP, so it shows up in LPrint's own job list. Previews and PDF rendering
@@ -24,7 +24,7 @@ drives should work; set `RENDER_DPI` to match.
 |---|---|---|
 | ZPL | `.zpl`, or any file containing `^XA` … `^XZ` (`.txt` must contain one) | the bytes, unchanged, as `application/vnd.zebra-zpl` |
 | PDF | `%PDF-` header | one job per label: the label boxes found on each page (or chosen in the preview), each a pure black/white PNG exactly the label's size, `print-scaling=fit` and the chosen `media` |
-| PNG / JPEG | magic bytes | the file unchanged, `print-scaling=fit` and the chosen `media` |
+| PNG / JPEG / GIF | magic bytes | as for a PDF: the image is taken as a one-page PDF (see [Images](#images)), so each label is a pure black/white PNG exactly the label's size, `print-scaling=fit` and the chosen `media` |
 
 Anything else is rejected, and so are uploads over 20 MB. EPL2 (the other format UPS and FedEx offer, recognised by an
 `N` line followed by commands such as `q`, `Q`, `A`, `B` or `P`) is refused with a message to choose ZPL or PDF in your
@@ -66,7 +66,8 @@ The preview is drawn in the container too, for up to 12 pages or labels:
   stays enabled; ZPL without `^PW`/`^LL` isn't checked.
 - **PDFs** show each page at 96 dpi with its label boxes drawn over it, and the labels cut from those boxes exactly as
   they'll be sent: black and white at `RENDER_DPI`, turned and fitted to the label size.
-- **PNG and JPEG** previews are drawn by your browser.
+- **Images** (PNG, JPEG, GIF) are previewed like a one-page PDF: the image with its label boxes, the labels exactly
+  as they'll be sent, and a note above saying how big the image was taken to be.
 
 ## Label area (PDFs)
 
@@ -95,6 +96,39 @@ page. labelprint finds the label-sized blocks on each page and prints each as it
 - **Known limit.** A label-sized block of instructions can't be told from a label, and appears as an extra box.
 - **Large-format pages are refused.** A page or box that would be over 16 megapixels at `RENDER_DPI` (about
   19.7 in square at 203 dpi; Tabloid is well inside) gets "too large to print as a label", to keep memory bounded.
+
+## Images
+
+Labels come as images too: ShipSaving sends PNGs, the UPS API GIFs, and FedEx 800 × 1200 PNGs at 200 dpi. An
+image goes through the same pipeline as a PDF, as a one-page PDF of its own. That gives it the label boxes and
+the editor, the UPS doc-tab choice, unscaled printing of a black/white label at about the printer's resolution,
+and the shrink warnings. A label is never enlarged. A gray or colour image (a screenshot, a JPEG) is thresholded
+to black and white, so LPrint's dither never sees it.
+
+**How big an image is.** An image has pixels, not inches, so labelprint works out its resolution (ppi), in
+order:
+
+1. The PNG's own `pHYs` density or the JPEG's JFIF density, when it's between 100 and 600 ppi. 72 and 96 are
+   usually placeholders, so they're ignored.
+2. The label size. When the image has the label's shape (within 3%), it's taken to be exactly the label's size. A
+   label plus a 1 in doc tab (4 × 7 in for 4 × 6 labels) counts too. This allows 50 to 600 ppi, so a 96 ppi
+   screenshot of a 4 × 6 label still comes out at 4 × 6 in.
+3. Otherwise, `RENDER_DPI`.
+
+The preview says which, above the image: "800 × 1200 px at 200 ppi (from the file) → 4 × 6 in" or "… (matched to
+the 4 × 6 in labels) …". When it had to guess, the note is a warning: "300 × 300 px (size guessed at 203 ppi —
+check it) → 1.48 × 1.48 in". A matched size can change with the label size, so changing it redraws the preview.
+If a guess is wrong, draw the box yourself or choose **whole image**.
+
+**Limits.** These are checked from the file's header before it's decoded, so an image can't tie up the host:
+
+- at most 4000 px on a side;
+- what decoding would take in memory, worked out from the header: at most 96 MB (two can run at once);
+- at most 64 scans in a JPEG (a progressive JPEG has about 10);
+- at least 0.5 in on a side at its ppi, and under the 16-megapixel cap at `RENDER_DPI`.
+
+Only an animated GIF's first frame is printed. EXIF rotation is ignored, and photos of labels aren't supported.
+TIFF, WebP and BMP aren't accepted.
 
 ## Feeding, test label and calibrating
 
@@ -134,7 +168,7 @@ holds at most 8 shares and 80 MB in total (more only if `MAX_UPLOAD_MB` is highe
 drops the oldest share to make room.
 
 **Android (Chrome).** Open labelprint in Chrome and choose **Add to Home screen** (or **Install app**) from the menu.
-It needs HTTPS. The installed app then appears in the share sheet for PDFs, PNGs, JPEGs and `.zpl`/`.txt` files. The
+It needs HTTPS. The installed app then appears in the share sheet for PDFs, PNGs, JPEGs, GIFs and `.zpl`/`.txt` files. The
 installed app shares Chrome's cookies, so stay signed in to your auth proxy. If the proxy sends the share to a login
 page, the file is lost, so open the app once to sign in, then share again.
 
@@ -216,6 +250,7 @@ All settings are environment variables. Only `LPRINT_URI` is required.
 | `MAX_PAGES` | `50` | most PDF pages one print may send |
 | `MAX_COPIES` | `100` | |
 | `RENDER_DPI` | `203` | resolution of PDF labels and ZPL previews. Match the printer |
+| `GOMEMLIMIT` | `400MiB` (set in the image) | Go's heap limit, under the example's 512 MB `mem_limit`. Raise the two together |
 | `USER_HEADER` | *(off)* | a request header your auth proxy sets to the signed-in user (Authelia: `Remote-User`), shown as the job's user in LPrint. Only set it if the proxy always overwrites that header |
 | `LISTEN_ADDR` | `:8080` | |
 
