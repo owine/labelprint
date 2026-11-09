@@ -2,12 +2,17 @@ package main
 
 import (
 	"bytes"
+	"compress/zlib"
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
 	"image"
+	"image/color"
+	"image/gif"
 	"image/jpeg"
 	"image/png"
+	"math"
+	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -31,6 +36,52 @@ func encodeJPEG(t testing.TB, img image.Image) []byte {
 		t.Fatal(err)
 	}
 	return b.Bytes()
+}
+
+func encodeGIF(t testing.TB, g *gif.GIF) []byte {
+	t.Helper()
+	var b bytes.Buffer
+	if err := gif.EncodeAll(&b, g); err != nil {
+		t.Fatal(err)
+	}
+	return b.Bytes()
+}
+
+// bigPNG is a w × h PNG whose every byte of pixel data is v: built by hand,
+// with Adam7 passes when interlaced (Go's encoder can't), and quick to make
+// at any size. colorType 3 gets a two-entry palette.
+func bigPNG(t testing.TB, w, h int, depth, colorType, interlace byte, v byte) []byte {
+	t.Helper()
+	channels := map[byte]int{0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[colorType]
+	bpp := channels * int(depth) / 8
+	var z bytes.Buffer
+	zw, _ := zlib.NewWriterLevel(&z, zlib.BestSpeed)
+	rows := func(pw, ph int) {
+		if pw == 0 || ph == 0 {
+			return
+		}
+		row := bytes.Repeat([]byte{v}, 1+pw*bpp)
+		row[0] = 0 // filter: none
+		for range ph {
+			_, _ = zw.Write(row)
+		}
+	}
+	if interlace == 0 {
+		rows(w, h)
+	} else {
+		for _, p := range [][4]int{{0, 0, 8, 8}, {4, 0, 8, 8}, {0, 4, 4, 8}, {2, 0, 4, 4}, {0, 2, 2, 4}, {1, 0, 2, 2}, {0, 1, 1, 2}} {
+			rows((w-p[0]+p[2]-1)/p[2], (h-p[1]+p[3]-1)/p[3])
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var extra [][]byte
+	if colorType == 3 {
+		extra = append(extra, pngChunk("PLTE", []byte{255, 255, 255, 0, 0, 0}))
+	}
+	extra = append(extra, pngChunk("IDAT", z.Bytes()), pngChunk("IEND", nil))
+	return pngHeader(uint32(w), uint32(h), depth, colorType, interlace, extra...)
 }
 
 // pngChunk is one PNG chunk: length, type, data, CRC.
@@ -257,5 +308,184 @@ func TestJPEGScanLimit(t *testing.T) {
 	wantUserError(t, err, 415, "couldn't read that image")
 	if d := time.Since(start); d > 50*time.Millisecond {
 		t.Errorf("refusing took %s: it must not decode", d)
+	}
+}
+
+// ---------------------------------------------------------------- decoding
+
+// flattenRef is flatten through At, the slow way.
+func flattenRef(img image.Image, w, h int) *image.Gray {
+	g := newWhite(w, h)
+	r := img.Bounds().Intersect(g.Rect)
+	for y := r.Min.Y; y < r.Max.Y; y++ {
+		for x := r.Min.X; x < r.Max.X; x++ {
+			g.Pix[y*g.Stride+x] = onWhite(img.At(x, y).RGBA())
+		}
+	}
+	return g
+}
+
+type setter interface{ Set(x, y int, c color.Color) }
+
+// testImages is one 100 × 100 image of every type the decoders return, with
+// a gradient, a black block and (where there's alpha) a see-through half.
+func testImages() map[string]image.Image {
+	r := image.Rect(0, 0, 100, 100)
+	pal := color.Palette{color.White, color.Black, color.RGBA{0x80, 0x40, 0x20, 0xff}, color.Transparent}
+	imgs := map[string]image.Image{
+		"gray": image.NewGray(r), "gray16": image.NewGray16(r), "rgba": image.NewRGBA(r),
+		"nrgba": image.NewNRGBA(r), "rgba64": image.NewRGBA64(r), "nrgba64": image.NewNRGBA64(r),
+		"cmyk": image.NewCMYK(r), "paletted": image.NewPaletted(r, pal),
+		"ycbcr420": image.NewYCbCr(r, image.YCbCrSubsampleRatio420),
+		"ycbcr444": image.NewYCbCr(r, image.YCbCrSubsampleRatio444),
+		"alpha":    image.NewAlpha(r), // no decoder returns it: the At fallback
+	}
+	for _, img := range imgs {
+		for y := range 100 {
+			for x := range 100 {
+				v := uint8(x * 255 / 99)
+				c := color.Color(color.NRGBA{v, uint8(255 - v), uint8(y * 2), 255})
+				if y >= 50 {
+					c = color.NRGBA{v, v, v, uint8(x * 2)} // see-through, more so to the left
+				}
+				if x >= 40 && x < 60 && y >= 10 && y < 30 {
+					c = color.Black
+				}
+				switch m := img.(type) {
+				case *image.YCbCr:
+					rr, gg, bb, _ := c.RGBA()
+					yy, cb, cr := color.RGBToYCbCr(uint8(rr>>8), uint8(gg>>8), uint8(bb>>8))
+					m.Y[m.YOffset(x, y)], m.Cb[m.COffset(x, y)], m.Cr[m.COffset(x, y)] = yy, cb, cr
+				case *image.Paletted:
+					m.SetColorIndex(x, y, uint8((x/25+y/25)%4))
+				case setter:
+					m.Set(x, y, c)
+				}
+			}
+		}
+	}
+	return imgs
+}
+
+func TestFlattenMatchesAt(t *testing.T) {
+	for name, img := range testImages() {
+		got, want := flatten(img, 100, 100), flattenRef(img, 100, 100)
+		for i := range got.Pix {
+			if d := int(got.Pix[i]) - int(want.Pix[i]); d < -1 || d > 1 {
+				t.Fatalf("%s: pixel (%d,%d) = %d, want %d", name, i%100, i/100, got.Pix[i], want.Pix[i])
+			}
+		}
+	}
+	// a transparent pixel is white, never black
+	n := image.NewNRGBA(image.Rect(0, 0, 2, 1))
+	n.Pix = []uint8{0, 0, 0, 0, 0, 0, 0, 255}
+	if g := flatten(n, 2, 1); g.Pix[0] != 255 || g.Pix[1] != 0 {
+		t.Errorf("transparent black = %d, opaque black = %d", g.Pix[0], g.Pix[1])
+	}
+}
+
+// At allocates for most types, once a pixel: flatten mustn't.
+func TestFlattenAllocsAreConstant(t *testing.T) {
+	for name, img := range testImages() {
+		if name == "alpha" {
+			continue // the At fallback
+		}
+		if n := testing.AllocsPerRun(5, func() { flatten(img, 100, 100) }); n > 4 {
+			t.Errorf("%s: %v allocations for 10000 pixels", name, n)
+		}
+	}
+}
+
+// A GIF frame can be smaller than its logical screen and offset within it;
+// gif.Decode returns only the first frame.
+func TestFlattenGIFFrame(t *testing.T) {
+	pal := color.Palette{color.White, color.Black}
+	frame := image.NewPaletted(image.Rect(10, 20, 30, 40), pal)
+	for i := range frame.Pix {
+		frame.Pix[i] = 1
+	}
+	second := image.NewPaletted(image.Rect(0, 0, 50, 60), pal) // all white
+	data := encodeGIF(t, &gif.GIF{Image: []*image.Paletted{frame, second}, Delay: []int{0, 0},
+		Config: image.Config{ColorModel: pal, Width: 50, Height: 60}})
+	w, h, err := checkImage(data, kindGIF)
+	if err != nil || w != 50 || h != 60 {
+		t.Fatalf("%d × %d, %v", w, h, err)
+	}
+	g, err := decodeGray(data, w, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for y := range 60 {
+		for x := range 50 {
+			want := uint8(255)
+			if image.Pt(x, y).In(frame.Rect) {
+				want = 0
+			}
+			if got := g.Pix[y*g.Stride+x]; got != want {
+				t.Fatalf("(%d,%d) = %d, want %d", x, y, got, want)
+			}
+		}
+	}
+}
+
+// The decode-memory estimate holds: decoding the largest image each class
+// admits, with the decoded image and the gray still held, grows the live
+// heap by no more than the estimate (1 MB of slack for the runtime's own).
+func TestDecodeLiveHeap(t *testing.T) {
+	side := func(bpp float64) int { return min(maxImageSide, int(math.Sqrt(maxDecodeBytes/(bpp+1)))) }
+	gifOf := func(s int) []byte {
+		return encodeGIF(t, &gif.GIF{Image: []*image.Paletted{image.NewPaletted(image.Rect(0, 0, s, s),
+			color.Palette{color.White, color.Black})}, Delay: []int{0}})
+	}
+	for _, c := range []struct {
+		name string
+		kind docKind
+		bpp  float64
+		make func(s int) []byte
+	}{
+		{"jpeg gray", kindJPEG, 1, func(s int) []byte { return handJPEG(s, s, 1, false, false, nil) }},
+		{"jpeg ycbcr", kindJPEG, 7, func(s int) []byte { return handJPEG(s, s, 3, false, false, nil) }},
+		{"jpeg rgb", kindJPEG, 7, func(s int) []byte { return handJPEG(s, s, 3, false, true, nil) }},
+		{"jpeg cmyk", kindJPEG, 8, func(s int) []byte { return handJPEG(s, s, 4, false, true, nil) }},
+		{"jpeg progressive gray", kindJPEG, 5, func(s int) []byte { return handJPEG(s, s, 1, true, false, progScans(1, 1)) }},
+		{"jpeg progressive ycbcr", kindJPEG, 19, func(s int) []byte { return handJPEG(s, s, 3, true, false, progScans(3, 1)) }},
+		{"jpeg progressive cmyk", kindJPEG, 24, func(s int) []byte { return handJPEG(s, s, 4, true, true, progScans(4, 1)) }},
+		{"png paletted", kindPNG, 1, func(s int) []byte { return bigPNG(t, s, s, 8, 3, 0, 0) }},
+		{"png gray", kindPNG, 4, func(s int) []byte { return bigPNG(t, s, s, 8, 0, 0, 0xff) }},
+		{"png rgba", kindPNG, 4, func(s int) []byte { return bigPNG(t, s, s, 8, 6, 0, 0xff) }},
+		{"png 16-bit rgba", kindPNG, 8, func(s int) []byte { return bigPNG(t, s, s, 16, 6, 0, 0xff) }},
+		{"png interlaced rgba", kindPNG, 8, func(s int) []byte { return bigPNG(t, s, s, 8, 6, 1, 0xff) }},
+		{"gif", kindGIF, 5, gifOf},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s := side(c.bpp)
+			data := c.make(s)
+			w, h, err := checkImage(data, c.kind)
+			if err != nil {
+				t.Fatalf("%d square isn't admitted: %v", s, err)
+			}
+			if over := s + 1; over <= maxImageSide {
+				if _, _, err := checkImage(c.make(over), c.kind); err == nil {
+					t.Fatalf("%d square is admitted: the estimate isn't %g B/px", over, c.bpp)
+				}
+			}
+			estimate := float64(w) * float64(h) * (c.bpp + 1)
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			img, _, err := image.Decode(bytes.NewReader(data))
+			if err != nil {
+				t.Fatal(err)
+			}
+			g := flatten(img, w, h)
+			runtime.GC()
+			runtime.ReadMemStats(&after)
+			runtime.KeepAlive(img)
+			runtime.KeepAlive(g)
+			grew := float64(after.HeapAlloc) - float64(before.HeapAlloc)
+			if grew > estimate+1<<20 {
+				t.Errorf("%d square: live heap grew %.1f MB, over the %.1f MB estimate", s, grew/1e6, estimate/1e6)
+			}
+		})
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"image"
+	"image/color"
 	_ "image/gif" // GIF uploads; bitmap.go registers PNG and JPEG
 	"net/http"
 )
@@ -161,3 +162,123 @@ func pngBytesPerPixel(data []byte) float64 {
 	}
 	return b
 }
+
+// ---------------------------------------------------------------- decoding
+
+// decodeGray decodes data and lays it on white as w × h gray. The decoded
+// image is dropped before it returns, so only the gray is left to hold.
+func decodeGray(data []byte, w, h int) (*image.Gray, error) {
+	img, _, err := image.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, errImageUnreadable
+	}
+	return flatten(img, w, h), nil
+}
+
+// onWhite is the gray level a premultiplied 16-bit colour shows laid on
+// white, with color.GrayModel's luma weights.
+func onWhite(r, g, b, a uint32) uint8 {
+	w := 0xffff - a
+	r, g, b = min(r+w, 0xffff), min(g+w, 0xffff), min(b+w, 0xffff)
+	return uint8((19595*r + 38470*g + 7471*b + 1<<15) >> 24)
+}
+
+func gray8(r, g, b uint8) uint8 {
+	return onWhite(uint32(r)*0x101, uint32(g)*0x101, uint32(b)*0x101, 0xffff)
+}
+
+// flatten lays img on a white w × h canvas at its own bounds (a GIF frame
+// can be smaller than, and offset within, its logical screen) and turns it
+// gray. Each type the decoders return is read from its Pix: At boxes every
+// pixel into an interface, an allocation each.
+func flatten(img image.Image, w, h int) *image.Gray {
+	g := newWhite(w, h)
+	r := img.Bounds().Intersect(g.Rect)
+	if r.Empty() {
+		return g
+	}
+	row := func(y int) []uint8 { return g.Pix[y*g.Stride : (y+1)*g.Stride] }
+	switch m := img.(type) {
+	case *image.Gray:
+		for y := r.Min.Y; y < r.Max.Y; y++ {
+			i := m.PixOffset(r.Min.X, y)
+			copy(row(y)[r.Min.X:r.Max.X], m.Pix[i:i+r.Dx()])
+		}
+	case *image.Gray16:
+		for y := r.Min.Y; y < r.Max.Y; y++ {
+			out, p := row(y), m.Pix[m.PixOffset(r.Min.X, y):]
+			for x := r.Min.X; x < r.Max.X; x, p = x+1, p[2:] {
+				v := uint32(p[0])<<8 | uint32(p[1])
+				out[x] = onWhite(v, v, v, 0xffff)
+			}
+		}
+	case *image.YCbCr:
+		for y := r.Min.Y; y < r.Max.Y; y++ {
+			out := row(y)
+			for x := r.Min.X; x < r.Max.X; x++ {
+				yi, ci := m.YOffset(x, y), m.COffset(x, y)
+				out[x] = gray8(color.YCbCrToRGB(m.Y[yi], m.Cb[ci], m.Cr[ci]))
+			}
+		}
+	case *image.CMYK:
+		for y := r.Min.Y; y < r.Max.Y; y++ {
+			out, p := row(y), m.Pix[m.PixOffset(r.Min.X, y):]
+			for x := r.Min.X; x < r.Max.X; x, p = x+1, p[4:] {
+				out[x] = gray8(color.CMYKToRGB(p[0], p[1], p[2], p[3]))
+			}
+		}
+	case *image.RGBA:
+		for y := r.Min.Y; y < r.Max.Y; y++ {
+			out, p := row(y), m.Pix[m.PixOffset(r.Min.X, y):]
+			for x := r.Min.X; x < r.Max.X; x, p = x+1, p[4:] {
+				out[x] = onWhite(uint32(p[0])*0x101, uint32(p[1])*0x101, uint32(p[2])*0x101, uint32(p[3])*0x101)
+			}
+		}
+	case *image.NRGBA:
+		for y := r.Min.Y; y < r.Max.Y; y++ {
+			out, p := row(y), m.Pix[m.PixOffset(r.Min.X, y):]
+			for x := r.Min.X; x < r.Max.X; x, p = x+1, p[4:] {
+				a := uint32(p[3])
+				out[x] = onWhite(uint32(p[0])*0x101*a/0xff, uint32(p[1])*0x101*a/0xff, uint32(p[2])*0x101*a/0xff, a*0x101)
+			}
+		}
+	case *image.RGBA64:
+		for y := r.Min.Y; y < r.Max.Y; y++ {
+			out, p := row(y), m.Pix[m.PixOffset(r.Min.X, y):]
+			for x := r.Min.X; x < r.Max.X; x, p = x+1, p[8:] {
+				out[x] = onWhite(be16(p), be16(p[2:]), be16(p[4:]), be16(p[6:]))
+			}
+		}
+	case *image.NRGBA64:
+		for y := r.Min.Y; y < r.Max.Y; y++ {
+			out, p := row(y), m.Pix[m.PixOffset(r.Min.X, y):]
+			for x := r.Min.X; x < r.Max.X; x, p = x+1, p[8:] {
+				a := be16(p[6:])
+				out[x] = onWhite(be16(p)*a/0xffff, be16(p[2:])*a/0xffff, be16(p[4:])*a/0xffff, a)
+			}
+		}
+	case *image.Paletted:
+		var lut [256]uint8 // an index past the palette is black, as image/png pads it
+		for i, c := range m.Palette {
+			if c != nil && i < len(lut) {
+				lut[i] = onWhite(c.RGBA())
+			}
+		}
+		for y := r.Min.Y; y < r.Max.Y; y++ {
+			out, p := row(y), m.Pix[m.PixOffset(r.Min.X, y):]
+			for x := r.Min.X; x < r.Max.X; x++ {
+				out[x] = lut[p[x-r.Min.X]]
+			}
+		}
+	default: // no decoder returns another type; correct, if slow
+		for y := r.Min.Y; y < r.Max.Y; y++ {
+			out := row(y)
+			for x := r.Min.X; x < r.Max.X; x++ {
+				out[x] = onWhite(img.At(x, y).RGBA())
+			}
+		}
+	}
+	return g
+}
+
+func be16(p []uint8) uint32 { return uint32(p[0])<<8 | uint32(p[1]) }
