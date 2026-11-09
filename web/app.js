@@ -369,28 +369,55 @@ function fillMedia(p) {
 
 const fmtSize = (n) => (n < 1024 ? `${n} B` : n < 1 << 20 ? `${(n / 1024).toFixed(0)} KB` : `${(n / (1 << 20)).toFixed(1)} MB`);
 
-// One file at a time for now: choosing a file replaces the one open.
-function chooseFile(file) {
-  clearResult();
-  for (const e of app.queue) dropEntry(e);
-  app.queue = [];
-  let e = blank;
-  if (file) {
-    e = newEntry(file);
-    app.queue.push(e);
-    if (file.size > app.maxMB * (1 << 20)) {
+// ---------------------------------------------------------------- the queue
+//
+// Files are added, never replaced, up to MAX_QUEUE. Each is previewed in the
+// background (kick); the open one (state) is in the editor below the list.
+
+const MAX_QUEUE = 10;
+
+// say puts a message in the status line by the list: adding files, previews
+// refused. #result is for print results only.
+function say(text) {
+  $('queue-status').textContent = text;
+}
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+// addFiles adds files to the end of the queue. Zero-byte files (folders in a
+// drop) are skipped and a file over the size limit is added as failed;
+// there's no type check here, the server's preview is it. The first file into
+// an empty queue opens, and so does the file a paste adds (open); other
+// additions leave the open file where it is.
+function addFiles(list, { open = false } = {}) {
+  const all = [...list];
+  if (!all.length) return; // a cancelled picker
+  const files = all.filter((f) => f.size > 0);
+  const msgs = [];
+  const skipped = all.length - files.length;
+  if (skipped) msgs.push(`skipped ${plural(skipped, 'empty file')} or folder${skipped === 1 ? '' : 's'}`);
+  const take = files.slice(0, Math.max(0, MAX_QUEUE - app.queue.length));
+  const left = files.length - take.length;
+  if (left) msgs.push(`the queue holds ${MAX_QUEUE} files — ${left} ${left === 1 ? "wasn't" : "weren't"} added`);
+  const added = take.map((f) => {
+    const e = newEntry(f);
+    if (f.size > app.maxMB * (1 << 20)) {
       e.pending = false;
-      showResult('err', `that file is ${fmtSize(file.size)} — the limit is ${app.maxMB} MB`);
+      e.status = 'failed';
+      e.error = { field: null, message: `over the ${app.maxMB} MB limit` };
+      msgs.push(`${f.name} is ${fmtSize(f.size)} — the limit is ${app.maxMB} MB`);
     }
-  } else {
-    $('file').value = '';
-    blank.copies = app.defaultCopies;
-  }
-  openEntry(e);
+    app.queue.push(e);
+    return e;
+  });
+  say(msgs.join(' · '));
+  if (added.length && (open || state === blank)) openEntry(added[0]);
+  renderQueue();
+  kick();
 }
 
 // dropEntry stops everything an entry has running: its debounce, its preview
-// request and its check poll.
+// request and its check poll, which frees the server's slot.
 function dropEntry(e) {
   clearTimeout(e.timer);
   e.timer = null;
@@ -398,19 +425,198 @@ function dropEntry(e) {
   e.abort = null;
   e.checkAbort?.abort();
   e.checkAbort = null;
+  if (app.bg?.e === e) app.bg = null;
+}
+
+// Removing a file opens the one that takes its place when it was open, and
+// moves focus to the next row's name (the previous row's if it was last), or
+// to the file input once the queue is empty.
+function removeEntry(e) {
+  const i = app.queue.indexOf(e);
+  if (i < 0) return;
+  dropEntry(e);
+  app.queue.splice(i, 1);
+  if ($('queue-status').textContent.startsWith(`${e.file.name}:`)) say(''); // its refusal
+  const next = app.queue[i] || app.queue[i - 1] || null;
+  if (e === state) openEntry(next || blank);
+  renderQueue();
+  kick();
+  if (next) rows.get(next.id).open.focus();
+  else $('file').focus();
+}
+
+function clearQueue() {
+  for (const e of app.queue) dropEntry(e);
+  app.queue = [];
+  openEntry(blank);
+  renderQueue();
+  say('');
+  $('file').focus();
 }
 
 // openEntry puts e in the editor: the mirrors (#copies, #pages, the layout
-// radios) are written from it, and it's drawn from its own data. A preview
-// it's waiting for and nothing is sending yet goes now.
+// radios) are written from it, and it's drawn from its own data. Opening
+// never loses a pending preview: the entry left keeps its debounce and its
+// request in flight. A preview e is waiting for that nothing is sending yet
+// goes now, and a check it had paused picks up again.
 function openEntry(e) {
+  if (e === state) return;
+  const prev = state;
+  if (prev.checkAbort) { // paused: its results so far stay in prev.check
+    prev.checkAbort.abort();
+    prev.checkAbort = null;
+  }
   state = e;
+  if (e === blank) blank.copies = app.defaultCopies;
+  if (app.bg?.e === e) app.bg = null; // the open entry's requests aren't the scheduler's
   $('copies').value = e.copies;
   $('pages').value = e.pages;
   document.querySelector(`input[name="layout"][value="${e.layout}"]`).checked = true;
   if (needsPreview(e)) requestPreview(e);
+  else if (e.check && !e.check.done && !e.checkAbort) pollCheck(e);
   renderEntry(e);
+  renderQueue();
+  kick();
 }
+
+// The background scheduler sends one request at a time for files that aren't
+// open, in queue order, so the server's two pipeline slots aren't flooded
+// (the open file's own requests use the other, and never wait for it).
+function kick() {
+  if (app.bg) return;
+  const e = app.queue.find((x) => x !== state && needsPreview(x));
+  if (!e) return;
+  app.bg = { e, what: 'preview' };
+  requestPreview(e);
+}
+
+// ---------------------------------------------------------------- the list
+
+const rows = new Map(); // entry id → its row's elements, kept so focus survives updates
+
+// labelUnits: what one copy of an entry prints. A zpl file counts as one, as
+// the summary always has: it's one job.
+const labelUnits = (e) => (paged(e.kind) ? pdfLabelCount(e) : e.kind === 'zpl' ? 1 : 0);
+const copiesOK = (e) => {
+  const n = wholeCopies(e.copies);
+  return n >= 1 && n <= app.maxCopies;
+};
+
+// Whether any label the entry would print shrinks below SCALE_WARN.
+function shrinks(e) {
+  for (const pg of e.pdf.pages.values()) {
+    if (!pg.stale && pg.labelImages.some((li) => li.scale < SCALE_WARN)) return true;
+  }
+  return false;
+}
+
+// The reasons a row gets a ⚠, in words.
+function rowWarnings(e) {
+  const out = [];
+  if (e.status === 'failed') out.push(e.error?.message || 'refused');
+  if (e.previewError) out.push(e.previewError);
+  if (!copiesOK(e)) out.push(`copies must be a whole number, 1 to ${app.maxCopies}`);
+  if (paged(e.kind)) {
+    const empty = emptyPages(e);
+    if (empty.length) out.push(isImage(e) ? 'the image has no labels' : `page ${empty[0].page} has no labels`);
+    if (shrinks(e)) out.push('shrinks below 95%');
+    if (unreadLabels(e)) out.push("barcode couldn't be read");
+  }
+  if (e.kind === 'zpl' && e.reply?.fitWarning) out.push('zpl bigger than the labels');
+  return out;
+}
+
+function makeRow(e) {
+  const open = el('button', { type: 'button', className: 'queue-open', textContent: e.file.name });
+  open.setAttribute('aria-controls', 'editor');
+  open.addEventListener('click', () => openEntry(e));
+  const remove = el('button', { type: 'button', className: 'btn btn-ghost btn-sm', textContent: 'remove' });
+  remove.setAttribute('aria-label', `remove ${e.file.name}`);
+  remove.addEventListener('click', () => removeEntry(e));
+  const r = {
+    li: el('li', { className: 'queue-row' }),
+    open,
+    kind: el('span'),
+    count: el('span', { className: 'queue-meta' }),
+    warn: el('span', { className: 'queue-warn' }),
+    copies: el('span', { className: 'queue-meta' }),
+    remove,
+  };
+  r.li.append(r.open, r.kind, r.count, r.warn, r.copies, r.remove);
+  return r;
+}
+
+// Row values come from the entry each time; there's no cache. Updates from
+// background work aren't announced: the list isn't a live region.
+function fillRow(e, r) {
+  const isOpen = e === state;
+  r.li.classList.toggle('open', isOpen);
+  if (isOpen) r.open.setAttribute('aria-current', 'true');
+  else r.open.removeAttribute('aria-current');
+  const failed = e.status === 'failed';
+  r.kind.className = 'badge ' + (failed ? 'badge-danger' : 'badge-accent');
+  r.kind.textContent = e.kind || (failed ? 'rejected' : '…');
+  r.count.classList.toggle('bad', failed || e.status === 'partly-sent');
+  r.count.textContent = failed ? 'failed'
+    : e.status === 'partly-sent' ? 'partly sent'
+      : !e.reply ? (e.previewError && !busy(e) ? 'not previewed' : 'previewing…')
+        : plural(labelUnits(e), 'label') + (e.status === 'print-failed' ? ' · not sent' : '');
+  const warns = rowWarnings(e);
+  r.warn.hidden = !warns.length;
+  r.warn.title = warns.join('; ');
+  r.warn.replaceChildren('⚠', el('span', { className: 'visually-hidden', textContent: ` ${warns.join('; ')}` }));
+  r.copies.textContent = `×${e.copies}`;
+}
+
+function renderQueue() {
+  const list = $('queue-list');
+  const ids = new Set(app.queue.map((e) => e.id));
+  for (const [id, r] of rows) {
+    if (!ids.has(id)) {
+      r.li.remove();
+      rows.delete(id);
+    }
+  }
+  let labels = 0;
+  for (const e of app.queue) {
+    let r = rows.get(e.id);
+    if (!r) {
+      r = makeRow(e);
+      rows.set(e.id, r);
+      list.append(r.li);
+    }
+    fillRow(e, r);
+    if (e.reply && e.status !== 'failed' && copiesOK(e)) labels += labelUnits(e) * wholeCopies(e.copies);
+  }
+  const n = app.queue.length;
+  $('queue').hidden = !n;
+  if (!n) disarmClear();
+  $('queue-title').textContent = `queue · ${plural(n, 'file')} · ${plural(labels, 'label')}`;
+}
+
+// clear all takes two presses: "clear all", then "clear all — sure?" within
+// 4 s, like cancelling a job.
+let clearTimer = null;
+function disarmClear() {
+  clearTimeout(clearTimer);
+  clearTimer = null;
+  const btn = $('clear-all');
+  btn.textContent = 'clear all';
+  btn.removeAttribute('aria-label');
+  btn.classList.remove('armed');
+}
+$('clear-all').addEventListener('click', () => {
+  const btn = $('clear-all');
+  if (!clearTimer) {
+    btn.textContent = 'clear all — sure?';
+    btn.setAttribute('aria-label', 'clear all — sure?');
+    btn.classList.add('armed');
+    clearTimer = setTimeout(disarmClear, 4000);
+    return;
+  }
+  disarmClear();
+  clearQueue();
+});
 
 // For ZPL the size only shapes the preview (where the zpl doesn't set ^PW/^LL
 // itself); the printer goes by the zpl, so it isn't sent with the job.
@@ -451,8 +657,9 @@ async function requestPreview(e) {
     err = x;
   }
   if (e.abort === ctrl) e.abort = null;
-  if (ctrl.signal.aborted) return; // a newer request, or the entry was dropped
-  applyPreview(e, seq, r, err);
+  if (!ctrl.signal.aborted) applyPreview(e, seq, r, err); // else a newer request, or the entry was dropped
+  if (app.bg?.what === 'preview' && app.bg.e === e && !e.abort) app.bg = null;
+  kick();
 }
 
 // applyPreview takes a reply (r) or a refusal (err) into the entry's data.
@@ -487,7 +694,8 @@ function applyPreview(e, seq, r, err) {
     startCheck(e, r.check); // before drawing, so the label lines start as "checking"
   }
   renderEntry(e);
-  if (err && !err.body?.field && e === state) showResult('err', err.message);
+  renderQueue();
+  if (err && !err.body?.field) say(`${e.file.name}: ${err.message}`);
 }
 
 // renderEntry draws the open entry from its data: the file row, the fields
@@ -497,7 +705,7 @@ function applyPreview(e, seq, r, err) {
 function renderEntry(e) {
   if (e !== state) return;
   const box = $('preview');
-  $('drop').classList.toggle('has-file', !!e.file);
+  $('drop').classList.toggle('has-file', app.queue.length > 0);
   $('file-row').hidden = !e.file;
   if (!e.file) {
     box.hidden = true;
@@ -514,7 +722,9 @@ function renderEntry(e) {
   kind.textContent = e.kind || (rejected ? 'rejected' : '…');
   kind.className = 'badge ' + (rejected ? 'badge-danger' : 'badge-accent');
   const k = e.reply?.kind;
-  $('pages-field').hidden = k !== 'pdf'; // an image is one page
+  // an image is one page; a range refused on the first preview (a pdf over the
+  // page limit) needs the field to fix it
+  $('pages-field').hidden = k !== 'pdf' && e.error?.field !== 'pages';
   $('layout-field').hidden = !paged(k);
   $('layout-whole').textContent = k === 'pdf' ? 'whole page' : 'whole image';
   setMediaHint(k);
@@ -523,7 +733,11 @@ function renderEntry(e) {
   else $('pages').removeAttribute('aria-invalid');
   $('pages-hint').textContent = pagesErr ? e.error.message : 'e.g. 1-3, 5';
   box.hidden = !e.reply || rejected;
-  if (!box.hidden) {
+  if (box.hidden) {
+    // nothing to draw
+  } else if (paged(e.reply.kind) && !e.pdf.pages.size && busy(e)) {
+    renderUpdating();
+  } else {
     renderPreview(e);
     if (e.error?.field) fieldError(e);
   }
@@ -545,6 +759,19 @@ function fieldError(e) {
     note.textContent = e.error.message;
     note.classList.add('err');
   }
+}
+
+// An entry opened while its range, size or layout is being re-previewed has
+// no pages to show until the reply lands (clearEdits dropped them).
+function renderUpdating() {
+  $('preview-grid').replaceChildren();
+  const note = $('preview-note');
+  note.textContent = 'updating…';
+  note.classList.remove('err');
+  $('image-note').hidden = true;
+  $('preview-warning').hidden = true;
+  document.querySelector('.zpl-source')?.remove();
+  document.querySelector('.zpl-tracking')?.remove();
 }
 
 function renderPreview(e) {
@@ -987,7 +1214,7 @@ function startCheck(e, token) {
   stopCheck(e);
   if (!token) return; // nothing to check, or too big to hold: no lines
   e.check = { token, labels: new Map(), failed: false, done: false };
-  pollCheck(e);
+  if (e === state) pollCheck(e); // a closed entry's waits until it's opened
 }
 
 // pollCheck polls e's check under a new AbortController (e.checkAbort).
@@ -1025,6 +1252,7 @@ async function pollCheck(e) {
   chk.done = true;
   if (e.checkAbort === ctrl) e.checkAbort = null;
   if (e.check === chk && e === state) showChecks();
+  renderQueue();
 }
 
 // A label's result: pending until it has one, "timeout" once the check is
@@ -1115,6 +1343,7 @@ function zplSource(e, open) {
 }
 
 function updateSummary() {
+  renderQueue();
   const btn = $('print');
   const copies = wholeCopies(state.copies);
   const copiesOK = copies >= 1 && copies <= app.maxCopies;
@@ -1196,11 +1425,15 @@ drop.addEventListener('drop', (e) => {
   e.preventDefault();
   dragDepth = 0;
   drop.classList.remove('dragging');
-  const f = e.dataTransfer?.files?.[0];
-  if (f) chooseFile(f);
+  addFiles(e.dataTransfer?.files || []);
 });
-$('file').addEventListener('change', (e) => chooseFile(e.target.files[0] || null));
-$('clear').addEventListener('click', () => chooseFile(null));
+// value is cleared, so choosing the same file again adds it again
+$('file').addEventListener('change', (e) => {
+  const files = [...e.target.files];
+  e.target.value = '';
+  addFiles(files);
+});
+$('clear').addEventListener('click', () => removeEntry(state));
 
 // ---------------------------------------------------------------- print
 
@@ -1266,11 +1499,6 @@ function showResult(tone, headline, details = []) {
   box.replaceChildren(el('strong', { textContent: headline }));
   if (details.length) box.append(el('ul', {}, ...details.map((d) => el('li', { textContent: d }))));
   box.hidden = false;
-}
-
-function clearResult() {
-  app.lastResult = null;
-  $('result').hidden = true;
 }
 
 // ---------------------------------------------------------------- jobs
@@ -1418,17 +1646,18 @@ async function cancelClick(id) {
 
 // ---------------------------------------------------------------- paste
 
-// A file on the clipboard (a copied pdf, a screenshot) loads like a drop. In a
-// text field the field gets the paste if there's text for it, so pasting into
-// pages or copies works as usual; a file with no text (a screenshot) still
-// loads, since the field couldn't take it anyway.
+// A file on the clipboard (a copied pdf, a screenshot) is added to the queue
+// and opened; only the first, and of any type. In a text field the field gets
+// the paste if there's text for it, so pasting into pages or copies works as
+// usual; a file with no text (a screenshot) still loads, since the field
+// couldn't take it anyway.
 document.addEventListener('paste', (e) => {
   const f = e.clipboardData?.files?.[0];
   if (!f) return;
   const field = e.target.closest?.('input:not([type=file]), textarea, [contenteditable]');
   if (field && e.clipboardData.types.includes('text/plain')) return;
   e.preventDefault();
-  chooseFile(f);
+  addFiles([f], { open: true });
 });
 
 // ---------------------------------------------------------------- remembered settings
@@ -1604,8 +1833,8 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').cat
   fillMedia(p || { media: [{ name: 'na_index-4x6_4x6in', label: '4 × 6 in' }], defaultMedia: 'na_index-4x6_4x6in' });
   // after the size limit and media list are known, which the preview needs
   const s = await shared;
-  if (s?.file) chooseFile(s.file);
-  else if (s?.error) showResult('err', s.error);
+  if (s?.file) addFiles([s.file]);
+  else if (s?.error) say(s.error);
   loadJobs();
   setInterval(async () => { const q = await loadPrinter(); if (q) fillMedia(q); }, 30000);
 })();
