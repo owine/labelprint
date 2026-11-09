@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"compress/zlib"
+	"context"
 	"encoding/binary"
 	"errors"
 	"hash/crc32"
@@ -12,6 +13,9 @@ import (
 	"image/jpeg"
 	"image/png"
 	"math"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"testing"
@@ -566,5 +570,142 @@ func TestCheckImageSizeAtItsPPI(t *testing.T) {
 		if err := checkImageSize(int(ok[0]), int(ok[1]), ok[2], 203); err != nil {
 			t.Errorf("%v: %v", ok, err)
 		}
+	}
+}
+
+// ---------------------------------------------------------------- the pdf
+
+// extractImage runs pdfimages -png on pdf and decodes its one image.
+func extractImage(t *testing.T, pdf []byte) *image.Gray {
+	t.Helper()
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.pdf")
+	if err := os.WriteFile(in, pdf, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("pdfimages", "-png", in, filepath.Join(dir, "im")).CombinedOutput(); err != nil {
+		t.Fatalf("pdfimages: %v: %s", err, out)
+	}
+	files, _ := filepath.Glob(filepath.Join(dir, "im-*.png"))
+	if len(files) != 1 {
+		t.Fatalf("pdfimages wrote %d images", len(files))
+	}
+	f, err := os.Open(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	img, err := png.Decode(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return toGray(img)
+}
+
+// Every kind round-trips: pdfimages gets back exactly the gray wrapImage
+// made, on a page W×72/ppi by H×72/ppi points.
+func TestWrapImageRoundTrip(t *testing.T) {
+	requirePoppler(t)
+	label := labelBitmap(200, 300).gray()
+	bilevel := image.NewPaletted(label.Rect, color.Palette{color.Black, color.White})
+	for i, v := range label.Pix {
+		bilevel.Pix[i] = v / 255
+	}
+	pal := image.NewPaletted(label.Rect, color.Palette{color.White, color.Black, color.RGBA{0x80, 0x80, 0xff, 0xff}})
+	for i, v := range label.Pix {
+		pal.Pix[i] = uint8(i%3) * (1 - v/255) // the ink in two colours
+	}
+	g16 := image.NewGray16(label.Rect)
+	rgba := image.NewNRGBA(label.Rect) // black ink on a transparent ground
+	for i, v := range label.Pix {
+		g16.Pix[2*i], g16.Pix[2*i+1] = v, 0x80
+		if v == 0 {
+			rgba.Pix[4*i+3] = 0xff
+		}
+	}
+	rgb := image.NewRGBA(label.Rect)
+	for i, v := range label.Pix {
+		rgb.Pix[4*i], rgb.Pix[4*i+1], rgb.Pix[4*i+2], rgb.Pix[4*i+3] = v, v/2, 0xff, 0xff
+	}
+	gifPal := color.Palette{color.White, color.Black}
+	frame := image.NewPaletted(image.Rect(20, 30, 120, 230), gifPal) // smaller than the screen, offset
+	for i := range frame.Pix {
+		frame.Pix[i] = uint8(i % 2)
+	}
+	cases := []struct {
+		name string
+		data []byte
+		kind docKind
+		ppi  float64
+	}{
+		{"bilevel png", withPHYs(encodePNG(t, bilevel), 7874), kindPNG, 200},
+		{"palette png", encodePNG(t, pal), kindPNG, 203},
+		{"16-bit png", encodePNG(t, g16), kindPNG, 203},
+		{"transparent png", encodePNG(t, rgba), kindPNG, 203},
+		{"gray jpeg", withJFIF(encodeJPEG(t, label), 1, 300, 300), kindJPEG, 300},
+		{"rgb jpeg", encodeJPEG(t, rgb), kindJPEG, 203},
+		{"cmyk jpeg", handJPEG(200, 300, 4, false, true, nil), kindJPEG, 203},
+		{"gif", encodeGIF(t, &gif.GIF{Image: []*image.Paletted{bilevel}, Delay: []int{0}}), kindGIF, 203},
+		{"animated gif", encodeGIF(t, &gif.GIF{Image: []*image.Paletted{bilevel, image.NewPaletted(label.Rect,
+			color.Palette{color.Black})}, Delay: []int{10, 10}}), kindGIF, 203},
+		{"offset gif frame", encodeGIF(t, &gif.GIF{Image: []*image.Paletted{frame}, Delay: []int{0},
+			Config: image.Config{ColorModel: gifPal, Width: 200, Height: 300}}), kindGIF, 203},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pdf, info, err := wrapImage(context.Background(), c.data, c.kind, labelSize{}, false, 203)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.W != 200 || info.H != 300 || info.PPI != c.ppi {
+				t.Fatalf("info %+v, want 200 × 300 at %g", info, c.ppi)
+			}
+			want, err := decodeGray(c.data, 200, 300)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertGray(t, extractImage(t, pdf), want, c.name)
+			doc, err := newPDFRenderer(203, discardLog).open(context.Background(), pdf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer doc.Close()
+			pw, ph := doc.geom(1).size()
+			if doc.Pages != 1 || math.Abs(pw-200*72/c.ppi) > 0.01 || math.Abs(ph-300*72/c.ppi) > 0.01 {
+				t.Errorf("%d pages, page %g × %g pt", doc.Pages, pw, ph)
+			}
+			switch c.name {
+			case "transparent png": // the ground comes back white, the ink black
+				if want.Pix[0] != 0 || want.Pix[5*want.Stride+5] != 255 {
+					t.Errorf("border %d, inside %d", want.Pix[0], want.Pix[5*want.Stride+5])
+				}
+			case "offset gif frame": // white round the frame
+				if want.Pix[0] != 255 || want.Pix[30*want.Stride+21] != 0 {
+					t.Errorf("outside %d, in the frame %d", want.Pix[0], want.Pix[30*want.Stride+21])
+				}
+			case "animated gif": // the first frame only: the second is all black
+				assertGray(t, want, label, c.name)
+			}
+		})
+	}
+}
+
+// What can't print is refused from the header, before the decode.
+func TestWrapImageRefusesBeforeDecoding(t *testing.T) {
+	// 4000 square at 120 ppi (pHYs 4724), with no image data at all
+	big := pngHeader(4000, 4000, 8, 0, 0, physChunk(4724, 4724, 1))
+	_, info, err := wrapImage(context.Background(), big, kindPNG, labelSize{}, false, 203)
+	wantUserError(t, err, 422, "that image is too large to print as a label")
+	if info.PPI != 120 || info.PPISource != "phys" {
+		t.Errorf("info %+v", info)
+	}
+	small := encodePNG(t, image.NewGray(image.Rect(0, 0, 40, 40)))
+	_, _, err = wrapImage(context.Background(), small, kindPNG, labelSize{}, false, 203)
+	wantUserError(t, err, 422, "that image is too small to print as a label")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := wrapImage(ctx, encodePNG(t, labelBitmap(200, 300).gray()), kindPNG, labelSize{}, false, 203); !errors.Is(err, context.Canceled) {
+		t.Errorf("cancelled: %v", err)
 	}
 }

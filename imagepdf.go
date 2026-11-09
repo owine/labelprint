@@ -2,12 +2,17 @@ package main
 
 import (
 	"bytes"
+	"compress/zlib"
+	"context"
 	"encoding/binary"
+	"fmt"
 	"image"
 	"image/color"
 	_ "image/gif" // GIF uploads; bitmap.go registers PNG and JPEG
 	"math"
 	"net/http"
+	"strconv"
+	"strings"
 )
 
 // An uploaded image goes through the PDF pipeline: it's decoded here, laid
@@ -44,6 +49,34 @@ type imageInfo struct {
 	H         int     `json:"h"`
 	PPI       float64 `json:"ppi"`
 	PPISource string  `json:"ppiSource"`
+}
+
+// wrapImage checks an image from its header, decodes it to gray on white and
+// writes it as a one-page PDF, W×H pixels at its ppi. media is the label size
+// the request resolved (mediaOK false when it's unknown), which the ppi can
+// be matched to. Run it inside a pipeline slot: decoding is the costly part.
+func wrapImage(ctx context.Context, data []byte, kind docKind, media labelSize, mediaOK bool, dpi int) ([]byte, imageInfo, error) {
+	w, h, err := checkImage(data, kind)
+	if err != nil {
+		return nil, imageInfo{}, err
+	}
+	ppi, src := imagePPI(data, kind, w, h, media, mediaOK, dpi)
+	info := imageInfo{W: w, H: h, PPI: ppi, PPISource: src}
+	// Only the header so far: refuse what can't print before decoding it.
+	if err := checkImageSize(w, h, ppi, dpi); err != nil {
+		return nil, info, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, info, err
+	}
+	g, err := decodeGray(data, w, h)
+	if err != nil {
+		return nil, info, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, info, err
+	}
+	return imagePDF(g, ppi), info, nil
 }
 
 // ---------------------------------------------------------------- before decoding
@@ -401,4 +434,57 @@ func jfifPPI(data []byte) (float64, bool) {
 		i += 2 + n
 	}
 	return 0, false
+}
+
+// ---------------------------------------------------------------- the pdf
+
+// imagePDF writes g as a one-page PDF, W×H pixels at ppi: the page is the
+// image (MediaBox only, no /Rotate or CropBox), drawn as one 8-bit
+// DeviceGray XObject. It only ever wraps pixels decodeGray just made.
+func imagePDF(g *image.Gray, ppi float64) []byte {
+	w, h := g.Rect.Dx(), g.Rect.Dy()
+	var z bytes.Buffer
+	zw, _ := zlib.NewWriterLevel(&z, zlib.BestSpeed) // only fails for a bad level
+	for y := range h {
+		_, _ = zw.Write(g.Pix[y*g.Stride : y*g.Stride+w]) // a bytes.Buffer doesn't fail
+	}
+	_ = zw.Close()
+	pw, ph := pdfNum(float64(w)*72/ppi), pdfNum(float64(h)*72/ppi)
+	content := fmt.Sprintf("q %s 0 0 %s 0 0 cm /Im0 Do Q\n", pw, ph)
+
+	var out bytes.Buffer
+	out.Grow(z.Len() + 1024)
+	out.WriteString("%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+	var offsets []int // object n starts at offsets[n-1]
+	obj := func(dict string, stream []byte) {
+		offsets = append(offsets, out.Len())
+		fmt.Fprintf(&out, "%d 0 obj\n%s\n", len(offsets), dict)
+		if stream != nil {
+			out.WriteString("stream\n")
+			out.Write(stream)
+			out.WriteString("\nendstream\n")
+		}
+		out.WriteString("endobj\n")
+	}
+	obj("<< /Type /Catalog /Pages 2 0 R >>", nil)
+	obj("<< /Type /Pages /Kids [3 0 R] /Count 1 >>", nil)
+	obj(fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %s %s] "+
+		"/Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>", pw, ph), nil)
+	obj(fmt.Sprintf("<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceGray "+
+		"/BitsPerComponent 8 /Filter /FlateDecode /Length %d >>", w, h, z.Len()), z.Bytes())
+	obj(fmt.Sprintf("<< /Length %d >>", len(content)), []byte(content))
+	xref := out.Len()
+	fmt.Fprintf(&out, "xref\n0 %d\n0000000000 65535 f \n", len(offsets)+1)
+	for _, off := range offsets {
+		fmt.Fprintf(&out, "%010d 00000 n \n", off)
+	}
+	fmt.Fprintf(&out, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(offsets)+1, xref)
+	return out.Bytes()
+}
+
+// pdfNum writes v with up to 4 decimals, no exponent and no trailing zeros.
+func pdfNum(v float64) string {
+	s := strconv.FormatFloat(v, 'f', 4, 64)
+	s = strings.TrimRight(s, "0")
+	return strings.TrimSuffix(s, ".")
 }
