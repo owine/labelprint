@@ -241,9 +241,13 @@ tr.mine td.num { color: var(--accent); }
 .labels-col { gap: 16px; }
 .page-stage {
   position: relative; background: #fff; border: 1px solid var(--line); border-radius: 4px;
-  box-shadow: var(--shadow-1); overflow: hidden; touch-action: none; user-select: none;
+  box-shadow: var(--shadow-1); touch-action: none; user-select: none;
 }
-.page-stage img { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
+/* the stage doesn't clip, so a box at the page's edge (common for an image: the whole of it) keeps its
+   corner handles; the image is rounded itself instead */
+.page-stage img {
+  position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; border-radius: 3px;
+}
 .crop {
   position: absolute; border: 2px solid var(--accent); border-radius: 2px; cursor: move;
   background: color-mix(in oklab, var(--accent) 8%, transparent); outline: none;
