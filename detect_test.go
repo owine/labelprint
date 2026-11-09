@@ -149,3 +149,26 @@ func TestDetectEPL2SetupFirst(t *testing.T) {
 		}
 	}
 }
+
+// What an upload's kind is served or sent as, and which kinds go through the
+// label pipeline as images.
+func TestImageKinds(t *testing.T) {
+	for _, c := range []struct {
+		kind  docKind
+		mime  string
+		image bool
+	}{
+		{kindZPL, "application/vnd.zebra-zpl", false},
+		{kindPDF, "", false},
+		{kindPNG, "image/png", true},
+		{kindJPEG, "image/jpeg", true},
+		{kindGIF, "image/gif", true},
+	} {
+		if got := c.kind.mimeType(); got != c.mime {
+			t.Errorf("%s: mime type %q, want %q", c.kind, got, c.mime)
+		}
+		if got := c.kind.isImage(); got != c.image {
+			t.Errorf("%s: isImage %v", c.kind, got)
+		}
+	}
+}

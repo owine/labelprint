@@ -16,6 +16,7 @@ const (
 	kindPDF  docKind = "pdf"
 	kindPNG  docKind = "png"
 	kindJPEG docKind = "jpeg"
+	kindGIF  docKind = "gif"
 )
 
 // mimeType is what LPrint is told the document is (document-format).
@@ -27,9 +28,15 @@ func (k docKind) mimeType() string {
 		return "image/png"
 	case kindJPEG:
 		return "image/jpeg"
+	case kindGIF:
+		return "image/gif"
 	}
 	return "" // PDFs are never sent as-is
 }
+
+// isImage reports whether k is an image upload, which goes through the label
+// pipeline wrapped as a one-page PDF (imagepdf.go).
+func (k docKind) isImage() bool { return k == kindPNG || k == kindJPEG || k == kindGIF }
 
 // userError is a problem with the upload itself, shown to the user verbatim
 // with a 4xx status. Field names the form field at fault, if any, so the page
