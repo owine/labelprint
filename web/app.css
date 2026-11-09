@@ -205,8 +205,11 @@ tr.mine td.num { color: var(--accent); }
 
 /* ---------- label area control ---------- */
 .fields:has(#layout-field:not([hidden])) { grid-template-columns: 96px minmax(0, 1fr) 120px auto; }
+/* an image has no page range, so the label area takes the third column, sized to fit "whole image" */
+.fields:has(#layout-field:not([hidden])):has(#pages-field[hidden]) { grid-template-columns: 96px minmax(0, 1fr) auto; }
 @media (max-width: 560px) {
-  .fields:has(#layout-field:not([hidden])) { grid-template-columns: 1fr 1fr; }
+  .fields:has(#layout-field:not([hidden])),
+  .fields:has(#layout-field:not([hidden])):has(#pages-field[hidden]) { grid-template-columns: 1fr 1fr; }
   .field-layout { grid-column: 1 / -1; }
 }
 .field .field-label { font-size: 13px; font-weight: 500; color: var(--ink-2); }
