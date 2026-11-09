@@ -1,8 +1,9 @@
 # labelprint
 
 A one-page web app for printing shipping labels on a Zebra label printer. Drop in a ZPL, PDF, PNG, JPEG or GIF file
-(or paste one, or a screenshot), check the preview, pick copies and a label size, and press print. The page remembers
-the label size and copies in your browser; copies go back to 1 after each successful print. Every job goes to
+(or several, or paste one, or a screenshot), check the preview, pick copies and a label size, and press print. The
+page remembers the label size and copies in your browser; copies go back to 1 after each print that sends something.
+Every job goes to
 [LPrint](https://www.msweet.org/lprint/) over IPP, so it shows up in LPrint's own job list. Previews and PDF rendering
 happen inside the container; nothing is sent to an outside service, which matters for labels full of names and
 addresses.
@@ -100,6 +101,40 @@ page. labelprint finds the label-sized blocks on each page and prints each as it
 - **Known limit.** A label-sized block of instructions can't be told from a label, and appears as an extra box.
 - **Large-format pages are refused.** A page or box that would be over 16 megapixels at `RENDER_DPI` (about
   19.7 in square at 203 dpi; Tabloid is well inside) gets "too large to print as a label", to keep memory bounded.
+
+## Several files
+
+A multi-piece shipment comes as one label file per package: ShipSaving sends a PNG each, and FedEx a label per
+package. The page holds a queue of up to 10 files and prints them in one go.
+
+- **Adding.** Choose or drop several files at once, or paste one. Files are added to the end of the queue, never
+  replaced: **choosing a second file adds it, it doesn't swap out the first.** The list's header ("2 files") and the
+  button ("print 2 labels") show it; **remove** takes a file out, and **clear all** (press it twice) empties the queue.
+  Past 10 files, as many as fit are added and the page says how many weren't. Empty files and folders in a drop are
+  skipped. A file over the size limit, or one labelprint can't print, stays in the list marked failed, with the
+  reason, until you remove it.
+- **One file open at a time.** Each row shows the file's kind, labels, copies and a ⚠ for anything to look at (a
+  label that shrinks below 95%, a barcode that couldn't be read, ZPL bigger than the labels, a refused page range).
+  Pick a file's name to open it in the editor below the list.
+- **Per file:** copies, page range, label area, box edits, flips and doc-tab choices. **Shared:** the label size, since
+  there's one roll in the printer. Changing it re-previews every file and clears their edits, and so does LPrint
+  dropping the size in use (the page says so).
+- **Barcode checks run for every file** in the background, one at a time, not only for the open one. The line by the
+  print button counts the labels whose barcode couldn't be read and the labels not checked yet.
+- **print N labels** sends every file, in list order, one after another. While it runs the page is locked: the list,
+  adding files, the label size, the editor, feed and the test label. A failure doesn't stop the rest, and the result
+  lists each file: sent (with its jobs), failed (with the reason) or partly sent.
+  - Files that printed leave the queue, so what's left is what didn't. A file that failed before anything was sent
+    (LPrint down, say) stays and is sent again by the next print.
+  - A file that failed after sending some of its jobs is marked **partly sent**. The next print asks before sending
+    all of it again; change its page range first to send only the rest.
+- **add back** on a printed file's line puts it back in the queue with its edits, to print again after a jam. It
+  works once per line.
+- **Copies** work as before: new files start from the last count you typed, and it goes back to 1 once a print has
+  sent something.
+- **A phone share starts a new page** holding just that file, since the queue isn't kept across reloads. An installed
+  Android app that reuses its window would drop a queue you were building (untested); the iPhone shortcut opens its
+  own Safari tab.
 
 ## Images
 
