@@ -60,8 +60,9 @@ func makeLabelPDF(n int) []byte {
 // generators. Regenerate with UPDATE_FIXTURES=1 go test -run Fixture.
 func TestFixtureUpToDate(t *testing.T) {
 	for path, gen := range map[string]func() []byte{
-		"testdata/label-2page.pdf": func() []byte { return makeLabelPDF(2) },
-		"testdata/ups-2up.pdf":     func() []byte { return fixUPS2up(true, 200) },
+		"testdata/label-2page.pdf":  func() []byte { return makeLabelPDF(2) },
+		"testdata/ups-2up.pdf":      func() []byte { return fixUPS2up(true, 200) },
+		"testdata/label-200ppi.png": func() []byte { return label200ppi(t) },
 	} {
 		want := gen()
 		if os.Getenv("UPDATE_FIXTURES") == "1" {
@@ -80,7 +81,8 @@ func TestFixtureUpToDate(t *testing.T) {
 }
 
 // FIXTURE_DIR=/some/dir go test -run WriteFixtures writes every fixture there,
-// for trying the page by hand. They're synthetic: no real labels.
+// the synthetic images included, for trying the page by hand. They're
+// synthetic: no real labels.
 func TestWriteFixtures(t *testing.T) {
 	dir := os.Getenv("FIXTURE_DIR")
 	if dir == "" {
@@ -95,6 +97,9 @@ func TestWriteFixtures(t *testing.T) {
 		"12-return-tab-193.pdf": fixReturn(1395, 193, 193), "13-band.pdf": fixBand(),
 		"14-label-then-text.pdf": fixLabelThenText(), "15-small-label.pdf": fixSmallLabel(),
 		"16-framed-tab-first.pdf": fixFramedTabFirst(), "17-label-then-one-line.pdf": fixLabelThenOneLine(),
+		"18-label-200ppi.png": label200ppi(t), "19-ups-doc-tab.png": upsTabPNG(t),
+		"20-screenshot.jpg": screenshotJPEG(t), "21-label.gif": labelGIF(t),
+		"22-guessed-size.png": encodePNG(t, labelBitmap(300, 300).gray()),
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), pdf, 0o644); err != nil {
 			t.Fatal(err)

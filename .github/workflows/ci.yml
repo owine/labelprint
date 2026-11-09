@@ -200,6 +200,14 @@ jobs:
             file label.png | tee /dev/stderr | grep -q '812 x 1218'
           done
 
+          echo "== images go through the label pipeline (decoded and wrapped in the container)"
+          curl -fsS -F file=@testdata/label-200ppi.png http://localhost:8080/api/preview > img.json
+          jq -e '.kind == "png" and .labels == 1 and .image.ppi == 200 and .image.ppiSource == "phys"
+            and ([.pages[].labelImages[].method] == ["native"])' img.json >/dev/null
+          jq -r '.pages[0].labelImages[0].image' img.json | sed 's|^data:image/png;base64,||' \
+            | base64 -d > label.png
+          file label.png | tee /dev/stderr | grep -q '812 x 1218'
+
           echo "== zpl renders inside the container (zebrash, embedded fonts)"
           curl -fsS -F file=@testdata/sample.zpl http://localhost:8080/api/preview \
             | jq -e '.kind == "zpl" and .labels == 1 and (.pages | length) == 1 and .previewError == null' >/dev/null
