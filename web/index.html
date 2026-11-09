@@ -42,15 +42,27 @@
 
     <form id="form" class="card sheet" novalidate>
       <div class="drop" id="drop">
-        <input type="file" id="file" name="file" class="visually-hidden"
+        <input type="file" id="file" name="file" class="visually-hidden" multiple
                accept=".zpl,.txt,.pdf,.png,.jpg,.jpeg,.gif,application/pdf,image/png,image/jpeg,image/gif,text/plain">
         <label for="file" class="drop-target">
           <svg class="drop-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m17 8-5-5-5 5"/><path d="M12 3v12"/></svg>
           <span class="drop-title">drop or paste a file here, or <span class="link">choose one</span></span>
           <span class="label-mono">zpl · pdf · png · jpeg · gif</span>
         </label>
+        <!-- messages about adding files and their previews; print results go in #result -->
+        <p class="caption queue-status" id="queue-status" role="status"></p>
       </div>
 
+      <section class="queue" id="queue" aria-labelledby="queue-title" hidden>
+        <div class="queue-head">
+          <h2 class="queue-title" id="queue-title">queue</h2>
+          <button class="btn btn-ghost btn-sm" type="button" id="clear-all">clear all</button>
+        </div>
+        <ul class="queue-list" id="queue-list"></ul>
+      </section>
+
+      <!-- the open file; display: contents, so its parts stay in the sheet's layout -->
+      <fieldset class="editor" id="editor">
       <div class="file-row" id="file-row" hidden>
         <span class="badge badge-accent" id="file-kind">pdf</span>
         <span class="file-name" id="file-name"></span>
@@ -91,13 +103,25 @@
         <p class="preview-warning" id="preview-warning" role="status" hidden></p>
         <div class="preview-grid" id="preview-grid"></div>
       </div>
+      <p class="caption entry-summary" id="entry-summary" hidden></p>
+      </fieldset>
 
       <div class="actions">
         <button class="btn btn-primary btn-lg" id="print" type="submit" disabled>print</button>
         <span class="caption" id="summary">choose a file to start</span>
       </div>
 
-      <div id="result" class="result" role="status" aria-live="polite" hidden></div>
+      <!-- print all asks here before sending a partly sent file again -->
+      <div class="confirm" id="confirm" role="group" aria-labelledby="confirm-text" hidden>
+        <p id="confirm-text"></p>
+        <div class="confirm-actions">
+          <button class="btn btn-primary btn-sm" type="button" id="confirm-yes">send it again</button>
+          <button class="btn btn-ghost btn-sm" type="button" id="confirm-no">cancel</button>
+        </div>
+      </div>
+
+      <!-- print progress and results only; tabindex so focus can land on it after printing -->
+      <div id="result" class="result" role="status" aria-live="polite" tabindex="-1" hidden></div>
     </form>
 
     <section class="jobs" aria-labelledby="jobs-title">
