@@ -67,6 +67,7 @@ type pdfDoc struct {
 	geoms  []pageGeom          // per page, index page-1
 	images map[int][]pageImage // per page, filled on first need (native.go)
 	seq    int                 // names scratch files
+	noun   docNoun             // how messages name its pages
 }
 
 func (d *pdfDoc) geom(page int) pageGeom { return d.geoms[page-1] }
@@ -146,12 +147,13 @@ func lastLine(s string) string {
 // page can be 200 in on a side; at 203 dpi this allows about 19.7 in square.
 const maxRenderPx = 16_000_000
 
-// checkRender refuses a w × h pixel render of page that's over maxRenderPx.
-// Previews, detection, labels and path A's check render all come through it.
-func checkRender(page int, w, h float64) error {
+// checkRender refuses a w × h pixel render of what ("page 3", "the image")
+// that's over maxRenderPx. Previews, detection, labels and path A's check
+// render all come through it, as does wrapImage before it decodes.
+func checkRender(what string, w, h float64) error {
 	if w*h > maxRenderPx {
 		return &userError{Status: http.StatusUnprocessableEntity,
-			Msg: fmt.Sprintf("page %d is too large to print as a label", page)}
+			Msg: fmt.Sprintf("%s is too large to print as a label", what)}
 	}
 	return nil
 }
@@ -202,7 +204,7 @@ func (d *pdfDoc) renderPages(ctx context.Context, pages []int, dpi float64, aa b
 	defer os.RemoveAll(dir)
 	for _, p := range pages {
 		pw, ph := d.geom(p).size()
-		if err := checkRender(p, math.Ceil(pw/72*dpi), math.Ceil(ph/72*dpi)); err != nil {
+		if err := checkRender(d.noun.page(p), math.Ceil(pw/72*dpi), math.Ceil(ph/72*dpi)); err != nil {
 			return nil, err
 		}
 	}
@@ -214,7 +216,11 @@ func (d *pdfDoc) renderPages(ctx context.Context, pages []int, dpi float64, aa b
 		}
 		args = append(args, "-f", strconv.Itoa(run[0]), "-l", strconv.Itoa(run[1]), d.path, filepath.Join(dir, "p"))
 		if _, err := d.r.run(ctx, "pdftoppm", args...); err != nil {
-			return nil, fmt.Errorf("rendering pages %d–%d: %w", run[0], run[1], err)
+			what := fmt.Sprintf("pages %d–%d", run[0], run[1])
+			if d.noun.image {
+				what = d.noun.page(1)
+			}
+			return nil, fmt.Errorf("rendering %s: %w", what, err)
 		}
 	}
 	// Names are zero-padded to the document's page-count digits: read them back.
@@ -235,7 +241,7 @@ func (d *pdfDoc) renderPages(ctx context.Context, pages []int, dpi float64, aa b
 	}
 	for _, p := range pages {
 		if out[p] == nil {
-			return nil, fmt.Errorf("page %d didn't render", p)
+			return nil, fmt.Errorf("%s didn't render", d.noun.page(p))
 		}
 	}
 	return out, nil
@@ -247,12 +253,13 @@ func (d *pdfDoc) renderPages(ctx context.Context, pages []int, dpi float64, aa b
 func (d *pdfDoc) renderBoxAt(ctx context.Context, page int, b box, dpiX, dpiY float64, aa bool) (*image.Gray, error) {
 	pw, ph := d.geom(page).size()
 	fw, fh := pw/72*dpiX, ph/72*dpiY
-	if err := checkRender(page, math.Ceil(b.W*fw)+1, math.Ceil(b.H*fh)+1); err != nil { // +1: pixels rounds outwards
+	name := d.noun.page(page)
+	if err := checkRender(name, math.Ceil(b.W*fw)+1, math.Ceil(b.H*fh)+1); err != nil { // +1: pixels rounds outwards
 		return nil, err
 	}
 	r := b.pixels(fw, fh)
 	if r.Dx() < 1 || r.Dy() < 1 {
-		return nil, fmt.Errorf("page %d: the box is empty", page)
+		return nil, fmt.Errorf("%s: the box is empty", name)
 	}
 	base := d.scratch("box")
 	args := []string{"-png", "-gray", "-cropbox", "-rx", fmtDPI(dpiX), "-ry", fmtDPI(dpiY)}
@@ -264,16 +271,16 @@ func (d *pdfDoc) renderBoxAt(ctx context.Context, page int, b box, dpiX, dpiY fl
 		"-x", strconv.Itoa(r.Min.X), "-y", strconv.Itoa(r.Min.Y), "-W", strconv.Itoa(r.Dx()), "-H", strconv.Itoa(r.Dy()),
 		"-f", n, "-l", n, "-singlefile", d.path, base)
 	if _, err := d.r.run(ctx, "pdftoppm", args...); err != nil {
-		return nil, fmt.Errorf("rendering page %d: %w", page, err)
+		return nil, fmt.Errorf("rendering %s: %w", name, err)
 	}
 	defer os.Remove(base + ".png")
 	data, err := os.ReadFile(base + ".png")
 	if err != nil {
-		return nil, fmt.Errorf("rendering page %d: %w", page, err)
+		return nil, fmt.Errorf("rendering %s: %w", name, err)
 	}
 	img, err := decodePNGBytes(data)
 	if err != nil {
-		return nil, fmt.Errorf("rendering page %d: %w", page, err)
+		return nil, fmt.Errorf("rendering %s: %w", name, err)
 	}
 	return toGray(img), nil // poppler may write -gray as RGB
 }

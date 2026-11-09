@@ -166,6 +166,25 @@ func parsePageGeoms(out []byte, n int) ([]pageGeom, error) {
 	return g, nil
 }
 
+// docNoun is how messages name a page: "page 3" (and "the page") in a pdf,
+// "the image" for an uploaded image, which is wrapped as a one-page pdf.
+type docNoun struct{ image bool }
+
+func (n docNoun) page(p int) string {
+	if n.image {
+		return "the image"
+	}
+	return fmt.Sprintf("page %d", p)
+}
+
+// whole is what a box can run off: "the page", or "the image".
+func (n docNoun) whole() string {
+	if n.image {
+		return "the image"
+	}
+	return "the page"
+}
+
 // minBoxIn is the smallest side a crop may have: 0.5 in, less slack for
 // fractions sent with 4 decimals.
 const minBoxIn = 0.49
@@ -181,8 +200,9 @@ func parseLayout(v string) (string, error) {
 }
 
 // parseCrops reads the crops field: page number → boxes, for selected pages
-// only (other entries are ignored, unchecked).
-func parseCrops(v string, selected []int, inches func(page int) (w, h float64)) (map[int][]box, error) {
+// only (other entries are ignored, unchecked). An image's one page is 1; n
+// names it in messages.
+func parseCrops(v string, selected []int, inches func(page int) (w, h float64), n docNoun) (map[int][]box, error) {
 	if v == "" {
 		return nil, nil
 	}
@@ -206,23 +226,23 @@ func parseCrops(v string, selected []int, inches func(page int) (w, h float64)) 
 			continue
 		}
 		if len(list) == 0 {
-			return nil, fieldError("crops", "page %d has no label boxes", p)
+			return nil, fieldError("crops", "%s has no label boxes", n.page(p))
 		}
 		// Counted with what the page already has, in case a key ever aliases.
-		if n := len(out[p]) + len(list); n > maxBoxesPerPage {
-			return nil, fieldError("crops", "page %d has %d label boxes; the most is %d", p, n, maxBoxesPerPage)
+		if k := len(out[p]) + len(list); k > maxBoxesPerPage {
+			return nil, fieldError("crops", "%s has %d label boxes; the most is %d", n.page(p), k, maxBoxesPerPage)
 		}
 		pw, ph := inches(p)
 		for i, a := range list {
 			if len(a) != 4 {
-				return nil, fieldError("crops", "box %d on page %d needs 4 numbers", i+1, p)
+				return nil, fieldError("crops", "box %d on %s needs 4 numbers", i+1, n.page(p))
 			}
 			b := box{a[0], a[1], a[2], a[3]}
 			if !b.valid() {
-				return nil, fieldError("crops", "box %d on page %d runs off the page", i+1, p)
+				return nil, fieldError("crops", "box %d on %s runs off %s", i+1, n.page(p), n.whole())
 			}
 			if b.W*pw < minBoxIn || b.H*ph < minBoxIn {
-				return nil, fieldError("crops", "box %d on page %d is too small (under 0.5 in)", i+1, p)
+				return nil, fieldError("crops", "box %d on %s is too small (under 0.5 in)", i+1, n.page(p))
 			}
 			b.X, b.Y = max(b.X, 0), max(b.Y, 0)
 			b.W, b.H = min(b.W, 1-b.X), min(b.H, 1-b.Y)

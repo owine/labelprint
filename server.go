@@ -388,7 +388,7 @@ func (s *server) labelOpts(fields map[string]string, doc *pdfDoc, pages []int, m
 	if err != nil {
 		return labelOpts{}, err
 	}
-	crops, err := parseCrops(fields["crops"], pages, func(p int) (float64, float64) { return doc.geom(p).inches() })
+	crops, err := parseCrops(fields["crops"], pages, func(p int) (float64, float64) { return doc.geom(p).inches() }, doc.noun)
 	if err != nil {
 		return labelOpts{}, err
 	}

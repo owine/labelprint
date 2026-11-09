@@ -464,7 +464,20 @@ func TestFallbackBoxCanBeUnderTheCropMinimum(t *testing.T) {
 	}
 	b := pl.Boxes[0].round4()
 	if _, err := parseCrops(fmt.Sprintf(`{"2": [[%g, %g, %g, %g]]}`, b.X, b.Y, b.W, b.H), []int{2},
-		func(int) (float64, float64) { return 8.5, 11 }); err == nil {
+		func(int) (float64, float64) { return 8.5, 11 }, docNoun{}); err == nil {
 		t.Error("sent as it is, the box should be refused")
+	}
+}
+
+func TestRenderNamesTheImage(t *testing.T) {
+	doc := openTest(t, fixHugePages())
+	doc.noun = docNoun{image: true}
+	_, err := doc.renderPages(context.Background(), []int{1}, 203, false)
+	if err == nil || err.Error() != "the image is too large to print as a label" {
+		t.Errorf("renderPages: %v", err)
+	}
+	_, err = doc.renderBoxAt(context.Background(), 1, box{0, 0, 1, 1}, 203, 203, false)
+	if err == nil || err.Error() != "the image is too large to print as a label" {
+		t.Errorf("renderBoxAt: %v", err)
 	}
 }
