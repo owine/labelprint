@@ -167,6 +167,10 @@ Renovate extends the `owine/renovate-config` presets (base, automerge, go, docke
 Alpine line set by `branch=v3.XX` in `.github/renovate.json`. When the Alpine base crosses a release line, bump the base
 tag and digest, every apk pin, and that `branch=` in one PR.
 
+A package that's already in the base image (today `zlib`, for CVE-2026-4738) is pinned only to pull a repository fix
+in before an `alpine:3.24.x` image ships it. CI's "Flag apk pins the base image already satisfies" step warns once the
+base has caught up; then drop the pin (and its Dockerfile comment) in the PR that bumps the base.
+
 The shared `go` preset owns the Go rules; the only Go rules in this repo are the zebrash and gozxing ones (below). The preset gives: `go mod tidy` on every gomod
 update, indirect modules tracked (that's where zebrash's CVEs land), `golang.org/x/*` as one group, and one
 `go toolchain` PR for the golang image and go.mod's `go` directive, so CI and the image use the same Go. The `go`

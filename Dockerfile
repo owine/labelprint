@@ -33,6 +33,10 @@ LABEL org.opencontainers.image.title="labelprint" \
 #   Carrier label PDFs often reference those fonts without embedding them;
 #   with no fonts installed poppler would draw that text as nothing.
 # - fontconfig: how poppler finds those stand-ins
+# - zlib: already in the base image; pinned so a fix in the 3.24 repository
+#   (e.g. CVE-2026-4738, 1.4-r0) is installed without waiting for a new
+#   alpine:3.24.x image. Drop the pin once the base image ships it: CI's
+#   "Flag apk pins the base image already satisfies" step warns when it does.
 #
 # APK_CLOSURE is a cache key, not a setting: CI passes a hash of the package
 # set this `apk add` resolves to today, so the layer rebuilds when a
@@ -41,7 +45,8 @@ ARG APK_CLOSURE=
 RUN apk add --no-cache \
     poppler-utils=25.12.0-r1 \
     font-liberation=2.1.5-r2 \
-    fontconfig=2.17.1-r1 && \
+    fontconfig=2.17.1-r1 \
+    zlib=1.4-r0 && \
     # Build the font cache now: the root filesystem is read-only at runtime.
     fc-cache -f && \
     pdftoppm -v
