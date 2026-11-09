@@ -9,19 +9,55 @@ const el = (tag, props = {}, ...children) => {
   return node;
 };
 
-const state = {
-  file: null,
-  kind: null,          // server-confirmed: zpl | pdf | png | jpeg | gif
-  previewSeq: 0,       // drops out-of-order preview replies
+// What the whole page shares. Each file is an entry (newEntry); state is the
+// open one, the file in the editor.
+const app = {
+  queue: [],           // the entries, in order
   mine: new Set(),     // job ids submitted from this page
   lastResult: null,    // { jobs, warnings } of the last print, for live updates
   maxMB: 20,
   maxCopies: 100,
-  layout: 'auto',      // label area for pdfs and images: auto | page
-  pdf: { pages: new Map(), media: null, labelsElsewhere: 0, meta: null },
-  previewError: null,  // a field the last preview refused (pages, crops, layout): print waits for a good one
-  check: null,         // the shown preview's barcode check: { token, labels: Map "page:index" → result, failed }
+  defaultCopies: '1',  // the remembered copies count (#13): new entries start from it
+  printing: false,     // print all is running: the queue is locked
+  bg: null,            // the background scheduler's one request: { e, what: preview | check }
+  get open() { return state; },
 };
+
+let nextEntryId = 0;
+const blankPdf = () => ({ pages: new Map(), media: null, labelsElsewhere: 0, meta: null });
+
+// One file: its own settings, preview, edits and barcode check. The timer,
+// the two AbortControllers and previewSeq are the entry's own, so a reply or
+// a debounce always lands on the file it was for, open or not.
+function newEntry(file) {
+  return {
+    id: ++nextEntryId,   // for DOM and focus keys
+    file,
+    kind: null,          // server-confirmed: zpl | pdf | png | jpeg | gif
+    previewSeq: 0,       // drops out-of-order preview replies
+    layout: 'auto',      // label area for pdfs and images: auto | page
+    pdf: blankPdf(),
+    previewError: null,  // a field the last preview refused (pages, crops, layout): print waits for a good one
+    check: null,         // its barcode check: { token, labels: Map "page:index" → result, failed, done }
+    copies: app.defaultCopies, // as typed
+    pages: '',           // the page range, as typed
+    reply: null,         // the last applied preview reply: zpl and image redraws come from it
+    error: null,         // { field, message } of the last refused preview
+    pending: !!file,     // a preview is wanted that hasn't been applied yet
+    timer: null,         // its preview debounce
+    abort: null,         // AbortController of its preview request in flight
+    checkAbort: null,    // AbortController of its barcode-check poll
+    status: file ? 'previewing' : null, // previewing | ready | failed | print-failed | partly-sent
+    sent: [],            // job ids sent before a print failed partway
+    held: null,          // { seq, r, err }: a reply that landed mid-drag
+    checkRetried: false, // a 404'd check has had its one re-preview
+  };
+}
+
+// With no file open, state is the blank entry: never null, so no listener has
+// to check.
+const blank = newEntry(null);
+let state = blank;
 
 // ---------------------------------------------------------------- api
 
@@ -42,10 +78,10 @@ async function api(path, opts = {}) {
   return body;
 }
 
-function formData(extra = {}) {
+function formData(e, extra = {}) {
   const fd = new FormData();
   for (const [k, v] of Object.entries(extra)) fd.append(k, v);
-  fd.append('file', state.file, state.file.name); // file last: fields first keeps the server's reads small
+  fd.append('file', e.file, e.file.name); // file last: fields first keeps the server's reads small
   return fd;
 }
 
@@ -59,7 +95,7 @@ function formData(extra = {}) {
 // paged: kinds the server previews as pages with label boxes.
 const paged = (kind) => kind === 'pdf' || kind === 'png' || kind === 'jpeg' || kind === 'gif';
 // How the preview names a page: a pdf's by number, an image as itself.
-const isImage = () => paged(state.kind) && state.kind !== 'pdf';
+const isImage = (e = state) => paged(e.kind) && e.kind !== 'pdf';
 const pageRef = (pg) => (isImage() ? 'the image' : `page ${pg.page}`);
 const pageTag = (pg) => (isImage() ? 'image' : `p${pg.page}`);
 const wholeName = () => (isImage() ? 'image' : 'page');
@@ -76,14 +112,10 @@ const cloneBoxes = (bs) => bs.map((b) => ({ ...b, tab: b.tab ? { ...b.tab } : nu
 
 // A reply already on its way was asked for with the pages being dropped, so
 // it's dropped too (preview's seq check) rather than bring them back.
-function clearEdits() {
-  state.pdf.pages = new Map();
-  state.previewSeq++;
-  stopCheck();
-}
-
-function resetPdf() {
-  state.pdf = { pages: new Map(), media: null, labelsElsewhere: 0, meta: null };
+function clearEdits(e) {
+  e.pdf.pages = new Map();
+  e.previewSeq++;
+  stopCheck(e);
 }
 
 const unionBox = (a, b) => {
@@ -134,9 +166,9 @@ function labelNumbers(pg) {
 // line of text, a small label's box once its page is edited): each box is
 // grown to it before sending, since the server refuses smaller crops. A
 // flipped box gets a fifth number, 1, and the server turns its label 180°.
-function cropsField() {
+function cropsField(e) {
   const out = {};
-  for (const pg of state.pdf.pages.values()) {
+  for (const pg of e.pdf.pages.values()) {
     if (!pg.edited || !pg.boxes.length) continue;
     out[pg.page] = flatBoxes(pg).map((b) => {
       const g = growBox(b, pg);
@@ -147,10 +179,12 @@ function cropsField() {
   return Object.keys(out).length ? JSON.stringify(out) : '';
 }
 
-// requestFields are the form fields both preview and print send.
-function requestFields() {
-  const f = { pages: $('pages').value, media: $('media').value, layout: state.layout };
-  const crops = cropsField();
+// requestFields are the form fields both preview and print send for an
+// entry: its own page range, layout and boxes, and the shared label size.
+// #pages and #copies only mirror the open entry, so they're never read here.
+function requestFields(e, media = $('media').value) {
+  const f = { pages: e.pages, media, layout: e.layout };
+  const crops = cropsField(e);
   if (crops) f.crops = crops;
   return f;
 }
@@ -158,10 +192,10 @@ function requestFields() {
 // absorbPdf takes a preview reply, keeping the boxes of pages the user edited.
 // An edited page also keeps what detection said about it (auto, fallback,
 // skipped), since the reply describes the crops sent; reset goes back to that.
-function absorbPdf(r) {
-  state.pdf.media = r.widthIn ? { w: r.widthIn, h: r.heightIn } : null;
-  state.pdf.meta = { selected: r.selected, pageCount: r.pageCount };
-  const old = state.pdf.pages;
+function absorbPdf(e, r) {
+  e.pdf.media = r.widthIn ? { w: r.widthIn, h: r.heightIn } : null;
+  e.pdf.meta = { selected: r.selected, pageCount: r.pageCount };
+  const old = e.pdf.pages;
   const next = new Map();
   let shownLabels = 0;
   for (const p of r.pages || []) {
@@ -185,25 +219,26 @@ function absorbPdf(r) {
     next.set(p.page, pg);
   }
   // labels on pages past the preview cap, which the page doesn't hold
-  state.pdf.labelsElsewhere = (r.labels || 0) - shownLabels;
-  state.pdf.pages = next;
+  e.pdf.labelsElsewhere = (r.labels || 0) - shownLabels;
+  e.pdf.pages = next;
 }
 
-function pdfLabelCount() {
-  let n = state.pdf.labelsElsewhere;
-  for (const pg of state.pdf.pages.values()) n += flatBoxes(pg).length;
+function pdfLabelCount(e) {
+  let n = e.pdf.labelsElsewhere;
+  for (const pg of e.pdf.pages.values()) n += flatBoxes(pg).length;
   return n;
 }
 
 // Pages the user left with no boxes. A skipped page isn't one: it prints
 // nothing on purpose.
-function emptyPages() {
-  return [...state.pdf.pages.values()].filter((pg) => pg.edited && !pg.boxes.length);
+function emptyPages(e) {
+  return [...e.pdf.pages.values()].filter((pg) => pg.edited && !pg.boxes.length);
 }
 
 // Whether pg is the page on screen. Changing the page range (or size, or
 // layout) drops the pages before the reply that replaces them lands, so until
 // then the boxes on screen belong to no page and edits to them are ignored.
+// A closed entry's pages never match: state is the open entry.
 const live = (pg) => state.pdf.pages.get(pg.page) === pg;
 
 // An edit to a page: draw it, recount, and re-preview with its crops.
@@ -215,7 +250,7 @@ function markEdited(pg) {
   pg.stale = true;
   renderPdf();
   updateSummary();
-  if (pg.boxes.length) schedulePreview();
+  if (pg.boxes.length) schedulePreview(state);
 }
 
 // A moved or resized box no longer matches its detected doc tab: its choice
@@ -277,7 +312,7 @@ function resetPage(pg) {
   pg.boxes = cloneBoxes(pg.autoBoxes);
   renderPdf();
   updateSummary();
-  schedulePreview();
+  schedulePreview(state);
 }
 
 // ---------------------------------------------------------------- printer
@@ -334,37 +369,47 @@ function fillMedia(p) {
 
 const fmtSize = (n) => (n < 1024 ? `${n} B` : n < 1 << 20 ? `${(n / 1024).toFixed(0)} KB` : `${(n / (1 << 20)).toFixed(1)} MB`);
 
+// One file at a time for now: choosing a file replaces the one open.
 function chooseFile(file) {
-  stopCheck();
   clearResult();
-  state.file = file;
-  state.kind = null;
-  state.previewError = null;
-  resetPdf();
-  state.layout = 'auto';
-  document.querySelector('input[name="layout"][value="auto"]').checked = true;
-  $('drop').classList.toggle('has-file', !!file);
-  $('file-row').hidden = !file;
-  $('pages').value = '';
-  if (!file) {
+  for (const e of app.queue) dropEntry(e);
+  app.queue = [];
+  let e = blank;
+  if (file) {
+    e = newEntry(file);
+    app.queue.push(e);
+    if (file.size > app.maxMB * (1 << 20)) {
+      e.pending = false;
+      showResult('err', `that file is ${fmtSize(file.size)} — the limit is ${app.maxMB} MB`);
+    }
+  } else {
     $('file').value = '';
-    $('preview').hidden = true;
-    $('pages-field').hidden = true;
-    $('layout-field').hidden = true;
-    setMediaHint(null);
-    updateSummary();
-    return;
+    blank.copies = app.defaultCopies;
   }
-  $('file-name').textContent = file.name;
-  $('file-size').textContent = fmtSize(file.size);
-  $('file-kind').textContent = '…';
-  if (file.size > state.maxMB * (1 << 20)) {
-    showResult('err', `that file is ${fmtSize(file.size)} — the limit is ${state.maxMB} MB`);
-    $('preview').hidden = true;
-    updateSummary();
-    return;
-  }
-  preview();
+  openEntry(e);
+}
+
+// dropEntry stops everything an entry has running: its debounce, its preview
+// request and its check poll.
+function dropEntry(e) {
+  clearTimeout(e.timer);
+  e.timer = null;
+  e.abort?.abort();
+  e.abort = null;
+  e.checkAbort?.abort();
+  e.checkAbort = null;
+}
+
+// openEntry puts e in the editor: the mirrors (#copies, #pages, the layout
+// radios) are written from it, and it's drawn from its own data. A preview
+// it's waiting for and nothing is sending yet goes now.
+function openEntry(e) {
+  state = e;
+  $('copies').value = e.copies;
+  $('pages').value = e.pages;
+  document.querySelector(`input[name="layout"][value="${e.layout}"]`).checked = true;
+  if (needsPreview(e)) requestPreview(e);
+  renderEntry(e);
 }
 
 // For ZPL the size only shapes the preview (where the zpl doesn't set ^PW/^LL
@@ -373,67 +418,137 @@ function setMediaHint(kind) {
   $('media-hint').textContent = kind === 'zpl' ? 'for the preview and the size check — the zpl sets the printed size' : '';
 }
 
-async function preview() {
-  if (!state.file) return;
-  const seq = ++state.previewSeq;
-  stopCheck();
-  const box = $('preview');
-  box.classList.add('loading');
-  $('pages').removeAttribute('aria-invalid');
-  let r;
+// ---------------------------------------------------------------- preview
+//
+// A preview goes in three steps. requestPreview sends one for an entry;
+// applyPreview takes the reply into that entry's data, open or not; and
+// renderEntry draws the open entry from its data. The entry is captured
+// before any await, so a reply always lands on the file it was asked for.
+
+// busy: a preview is wanted or on its way.
+const busy = (e) => e.pending || !!e.abort;
+// needsPreview: wanted, and nothing (a debounce, a request) is sending it yet.
+const needsPreview = (e) => !!e.file && e.pending && !e.timer && !e.abort;
+
+async function requestPreview(e) {
+  if (!e.file) return;
+  clearTimeout(e.timer);
+  e.timer = null;
+  const seq = ++e.previewSeq;
+  e.abort?.abort();
+  const ctrl = new AbortController();
+  e.abort = ctrl;
+  stopCheck(e);
+  if (e === state) {
+    $('preview').classList.add('loading');
+    $('pages').removeAttribute('aria-invalid');
+  }
+  let r = null;
+  let err = null;
   try {
-    r = await api('/api/preview', { method: 'POST', body: formData(requestFields()) });
-  } catch (e) {
-    if (seq !== state.previewSeq) return;
-    box.classList.remove('loading');
-    const field = e.body?.field;
-    if (field) state.previewError = e.message;
-    // The range, size or layout changed, so the pages on screen are gone from
-    // state: take them away rather than leave boxes that edit nothing.
-    if (field && paged(state.kind) && !state.pdf.pages.size) {
-      $('preview-grid').replaceChildren();
-      $('preview-note').textContent = '';
-    }
-    if (field === 'pages') {
-      // a bad page range: keep the file, flag the field
-      $('pages').setAttribute('aria-invalid', 'true');
-      $('pages-hint').textContent = e.message;
-    } else if (field === 'crops' || field === 'layout') {
-      const note = $('preview-note');
-      note.textContent = e.message;
-      note.classList.add('err');
+    r = await api('/api/preview', { method: 'POST', body: formData(e, requestFields(e)), signal: ctrl.signal });
+  } catch (x) {
+    err = x;
+  }
+  if (e.abort === ctrl) e.abort = null;
+  if (ctrl.signal.aborted) return; // a newer request, or the entry was dropped
+  applyPreview(e, seq, r, err);
+}
+
+// applyPreview takes a reply (r) or a refusal (err) into the entry's data.
+// A reply that landed mid-drag on the open entry is held until the drag ends
+// (startDrag applies it), before absorbPdf: that makes every page anew, so
+// the page and box the drag holds would edit nothing and the box would snap
+// back.
+function applyPreview(e, seq, r, err) {
+  if (seq !== e.previewSeq || !app.queue.includes(e)) return;
+  if (e === state && dragging) {
+    e.held = { seq, r, err };
+    return;
+  }
+  e.held = null;
+  e.pending = false;
+  if (err) {
+    const field = err.body?.field || null;
+    e.error = { field, message: err.message };
+    if (field) {
+      e.previewError = err.message;
     } else {
-      state.kind = null;
-      $('file-kind').textContent = 'rejected';
-      $('file-kind').className = 'badge badge-danger';
-      box.hidden = true;
-      showResult('err', e.message);
+      e.kind = null;
+      e.status = 'failed';
     }
+  } else {
+    e.error = null;
+    e.previewError = null;
+    e.kind = r.kind;
+    e.reply = r;
+    if (paged(r.kind)) absorbPdf(e, r);
+    if (e.status === 'previewing' || e.status === 'failed') e.status = 'ready';
+    startCheck(e, r.check); // before drawing, so the label lines start as "checking"
+  }
+  renderEntry(e);
+  if (err && !err.body?.field && e === state) showResult('err', err.message);
+}
+
+// renderEntry draws the open entry from its data: the file row, the fields
+// its kind has, and its preview. The pages field and label area stay through
+// a refused re-preview (they come from the last reply), so the range or
+// layout that caused it can be changed.
+function renderEntry(e) {
+  if (e !== state) return;
+  const box = $('preview');
+  $('drop').classList.toggle('has-file', !!e.file);
+  $('file-row').hidden = !e.file;
+  if (!e.file) {
+    box.hidden = true;
+    $('pages-field').hidden = true;
+    $('layout-field').hidden = true;
+    setMediaHint(null);
     updateSummary();
     return;
   }
-  if (seq !== state.previewSeq) return;
-  if (dragging) { heldPreview = { r, seq }; return; }
-  showPreview(r);
-}
-
-function showPreview(r) {
-  state.previewError = null;
-  $('preview').classList.remove('loading');
-  $('pages-hint').textContent = 'e.g. 1-3, 5';
-  state.kind = r.kind;
-  $('file-kind').textContent = r.kind;
-  $('file-kind').className = 'badge badge-accent';
-  $('pages-field').hidden = r.kind !== 'pdf'; // an image is one page
-  $('layout-field').hidden = !paged(r.kind);
-  $('layout-whole').textContent = r.kind === 'pdf' ? 'whole page' : 'whole image';
-  setMediaHint(r.kind);
-  startCheck(r.check); // before drawing, so the label lines start as "checking"
-  renderPreview(r);
+  $('file-name').textContent = e.file.name;
+  $('file-size').textContent = fmtSize(e.file.size);
+  const kind = $('file-kind');
+  const rejected = e.status === 'failed';
+  kind.textContent = e.kind || (rejected ? 'rejected' : '…');
+  kind.className = 'badge ' + (rejected ? 'badge-danger' : 'badge-accent');
+  const k = e.reply?.kind;
+  $('pages-field').hidden = k !== 'pdf'; // an image is one page
+  $('layout-field').hidden = !paged(k);
+  $('layout-whole').textContent = k === 'pdf' ? 'whole page' : 'whole image';
+  setMediaHint(k);
+  const pagesErr = e.error?.field === 'pages';
+  if (pagesErr) $('pages').setAttribute('aria-invalid', 'true');
+  else $('pages').removeAttribute('aria-invalid');
+  $('pages-hint').textContent = pagesErr ? e.error.message : 'e.g. 1-3, 5';
+  box.hidden = !e.reply || rejected;
+  if (!box.hidden) {
+    renderPreview(e);
+    if (e.error?.field) fieldError(e);
+  }
+  box.classList.toggle('loading', !!e.abort || (e.pending && !e.pdf.pages.size));
   updateSummary();
 }
 
-function renderPreview(r) {
+// A refused range, size or layout: the pages on screen are gone from the
+// entry, so they're taken away rather than left as boxes that edit nothing.
+// A refused box or layout is said under the preview; a refused range by its
+// field (renderEntry).
+function fieldError(e) {
+  const note = $('preview-note');
+  if (paged(e.kind) && !e.pdf.pages.size) {
+    $('preview-grid').replaceChildren();
+    note.textContent = '';
+  }
+  if (e.error.field === 'crops' || e.error.field === 'layout') {
+    note.textContent = e.error.message;
+    note.classList.add('err');
+  }
+}
+
+function renderPreview(e) {
+  const r = e.reply;
   const grid = $('preview-grid');
   const note = $('preview-note');
   if (!paged(r.kind)) grid.replaceChildren(); // renderPdf swaps the pages itself, keeping focus
@@ -446,9 +561,7 @@ function renderPreview(r) {
   warning.hidden = !r.fitWarning;
   document.querySelector('.zpl-source')?.remove();
   document.querySelector('.zpl-tracking')?.remove();
-  $('preview').hidden = false;
   if (paged(r.kind)) {
-    absorbPdf(r);
     renderPdf();
   } else if (r.kind === 'zpl') {
     const n = r.labels || 0;
@@ -465,7 +578,7 @@ function renderPreview(r) {
           el('figcaption', { textContent: `label ${p.page}` })));
       }
     }
-    zplSource(!!r.previewError);
+    zplSource(e, !!r.previewError);
     zplTracking(r.tracking);
   }
 }
@@ -502,7 +615,7 @@ function renderPdf() {
   const focusCrop = crop ? { page: crop.dataset.page, index: crop.dataset.index, del: a !== crop } : null;
   const { selected, pageCount } = state.pdf.meta;
   const shown = state.pdf.pages.size;
-  const n = pdfLabelCount();
+  const n = pdfLabelCount(state);
   const m = state.pdf.media;
   // an image's own line is the image note, above
   note.textContent = (isImage() ? '' : `${selected} of ${pageCount} page${pageCount === 1 ? '' : 's'} · `) +
@@ -627,15 +740,16 @@ function boxEl(pg, b, i, num) {
   return node;
 }
 
-// A preview reply that lands mid-drag is held until the drag ends: redrawing
-// would swap the box being dragged for a new node and end the drag.
+// A preview reply that lands mid-drag is held (entry.held) until the drag
+// ends: redrawing would swap the box being dragged for a new node and end the
+// drag.
 let dragging = false;
-let heldPreview = null;
 
 function startDrag(e, pg, b, node, corner) {
   if (e.button !== 0 || dragging || !live(pg)) return;
   e.preventDefault();
   node.focus();
+  const entry = state;
   const stage = node.parentElement.getBoundingClientRect();
   const o = { ...b };
   const mw = MIN_IN / pg.widthIn;
@@ -675,10 +789,10 @@ function startDrag(e, pg, b, node, corner) {
       moved = false;
     }
     dragging = false;
-    const held = heldPreview;
-    heldPreview = null;
+    const held = entry.held;
+    entry.held = null;
     if (moved) boxChanged(pg, b); // re-previews, superseding the held reply
-    else if (held?.seq === state.previewSeq) showPreview(held.r);
+    else if (held?.seq === entry.previewSeq) applyPreview(entry, held.seq, held.r, held.err);
   };
   node.addEventListener('pointermove', move);
   node.addEventListener('pointerup', end);
@@ -860,30 +974,31 @@ function labelFigures(pg) {
 // the job name.
 
 const CHECK_GIVE_UP_MS = 30000;
-let checkAbort = null;
 
-function stopCheck() {
-  const had = !!state.check;
-  checkAbort?.abort();
-  checkAbort = null;
-  state.check = null;
-  if (had) showChecks();
+function stopCheck(e) {
+  const had = !!e.check;
+  e.checkAbort?.abort();
+  e.checkAbort = null;
+  e.check = null;
+  if (had && e === state) showChecks();
 }
 
-function startCheck(token) {
-  stopCheck();
+function startCheck(e, token) {
+  stopCheck(e);
   if (!token) return; // nothing to check, or too big to hold: no lines
-  const chk = { token, labels: new Map(), failed: false };
-  const ctrl = new AbortController();
-  state.check = chk;
-  checkAbort = ctrl;
-  pollCheck(chk, ctrl.signal);
+  e.check = { token, labels: new Map(), failed: false, done: false };
+  pollCheck(e);
 }
 
+// pollCheck polls e's check under a new AbortController (e.checkAbort).
 // Re-polls straight away until done; gives up after CHECK_GIVE_UP_MS. A 404
 // (expired or cancelled) or a lost connection is "didn't finish", never an
 // error banner.
-async function pollCheck(chk, signal) {
+async function pollCheck(e) {
+  const chk = e.check;
+  const ctrl = new AbortController();
+  e.checkAbort = ctrl;
+  const signal = ctrl.signal;
   const started = Date.now();
   for (;;) {
     let r;
@@ -894,7 +1009,7 @@ async function pollCheck(chk, signal) {
       chk.failed = true;
       break;
     }
-    if (signal.aborted || state.check !== chk) return;
+    if (signal.aborted || e.check !== chk) return;
     if (!r) { // a 200 that isn't json: an auth proxy's login page, say
       chk.failed = true;
       break;
@@ -905,15 +1020,17 @@ async function pollCheck(chk, signal) {
       chk.failed = true;
       break;
     }
-    showChecks(); // the labels finished so far
+    if (e === state) showChecks(); // the labels finished so far
   }
-  if (state.check === chk) showChecks();
+  chk.done = true;
+  if (e.checkAbort === ctrl) e.checkAbort = null;
+  if (e.check === chk && e === state) showChecks();
 }
 
 // A label's result: pending until it has one, "timeout" once the check is
-// given up; null when the preview on screen has no check.
-function checkResult(page, index) {
-  const chk = state.check;
+// given up; null when the entry's preview has no check.
+function checkResult(e, page, index) {
+  const chk = e.check;
   if (!chk) return null;
   const l = chk.labels.get(`${page}:${index}`);
   if (l && l.status !== 'pending') return l;
@@ -930,7 +1047,7 @@ function checkLine(page, index) {
 }
 
 function fillCheckLine(p) {
-  const l = checkResult(p.dataset.page, p.dataset.index);
+  const l = checkResult(state, p.dataset.page, p.dataset.index);
   p.className = 'check-line';
   p.hidden = !l;
   if (!l) {
@@ -965,11 +1082,11 @@ function showChecks() {
 
 // Checked labels on pages that aren't waiting for a re-preview, whose
 // barcode couldn't be read. Labels past the preview's cap aren't checked.
-function unreadLabels() {
-  const chk = state.check;
-  if (!chk || !paged(state.kind)) return 0;
+function unreadLabels(e) {
+  const chk = e.check;
+  if (!chk || !paged(e.kind)) return 0;
   let n = 0;
-  for (const pg of state.pdf.pages.values()) {
+  for (const pg of e.pdf.pages.values()) {
     if (pg.stale) continue;
     for (let k = 0; k < pg.labelImages.length; k++) {
       if (chk.labels.get(`${pg.page}:${k}`)?.status === 'none') n++;
@@ -988,30 +1105,30 @@ function zplTracking(entries) {
 }
 
 // the zpl itself, collapsed unless there's no picture to look at
-function zplSource(open) {
+function zplSource(e, open) {
   const pre = el('pre', { className: 'preview-zpl', tabIndex: 0 });
   const details = el('details', { className: 'zpl-source', open }, el('summary', { textContent: 'zpl source' }), pre);
   $('preview-grid').after(details);
-  state.file.slice(0, 4096).text().then((t) => {
-    pre.textContent = t + (state.file.size > 4096 ? '\n…' : '');
+  e.file.slice(0, 4096).text().then((t) => {
+    pre.textContent = t + (e.file.size > 4096 ? '\n…' : '');
   });
 }
 
 function updateSummary() {
   const btn = $('print');
-  const copies = wholeCopies($('copies').value);
-  const copiesOK = copies >= 1 && copies <= state.maxCopies;
+  const copies = wholeCopies(state.copies);
+  const copiesOK = copies >= 1 && copies <= app.maxCopies;
   if (copiesOK) $('copies').removeAttribute('aria-invalid');
   else $('copies').setAttribute('aria-invalid', 'true');
-  const empty = paged(state.kind) ? emptyPages() : [];
+  const empty = paged(state.kind) ? emptyPages(state) : [];
   btn.disabled = !state.kind || !copiesOK || empty.length > 0 || !!state.previewError;
   const sum = $('summary');
   if (!state.file) { sum.textContent = 'choose a file to start'; return; }
   if (!state.kind) { sum.textContent = ''; return; }
   if (state.previewError) { sum.textContent = state.previewError; return; }
-  if (!copiesOK) { sum.textContent = `copies: a whole number, 1 to ${state.maxCopies}`; return; }
+  if (!copiesOK) { sum.textContent = `copies: a whole number, 1 to ${app.maxCopies}`; return; }
   let units = 1;
-  if (paged(state.kind)) units = pdfLabelCount();
+  if (paged(state.kind)) units = pdfLabelCount(state);
   const total = units * copies;
   if (empty.length) {
     sum.textContent = isImage()
@@ -1019,37 +1136,52 @@ function updateSummary() {
       : `page ${empty[0].page} has no labels — add one, reset it, or leave it out of the page range`;
     return;
   }
-  const unread = unreadLabels();
+  const unread = unreadLabels(state);
   sum.textContent = (copies > 1 && units > 1
     ? `${units} labels × ${copies} copies = ${total} labels`
     : `${total} label${total === 1 ? '' : 's'}`) +
     (unread ? ` · ${unread} label${unread === 1 ? '' : 's'} whose barcode couldn't be read` : '');
 }
-$('copies').addEventListener('input', () => updateSummary());
+// #copies and #pages mirror the open entry: their listeners write into it.
+$('copies').addEventListener('input', () => {
+  state.copies = $('copies').value;
+  updateSummary();
+});
 
 // Scheduling a preview makes any reply still on its way out of date: it was
 // asked for before this edit, and showing it would draw the old boxes' labels
-// as current (and clear "updating…") until the new reply lands.
-let previewTimer;
-function schedulePreview() {
-  state.previewSeq++;
-  stopCheck();
-  clearTimeout(previewTimer);
-  previewTimer = setTimeout(preview, 450);
+// as current (and clear "updating…") until the new reply lands. The debounce
+// is the entry's own, so it fires for that entry whichever file is open by
+// then.
+function schedulePreview(e) {
+  if (!e.file) return;
+  e.pending = true;
+  e.previewSeq++;
+  stopCheck(e);
+  clearTimeout(e.timer);
+  e.timer = setTimeout(() => {
+    e.timer = null;
+    requestPreview(e);
+  }, 450);
 }
 // the boxes on screen stop being editable at once (see live): dim them until the reply
 $('pages').addEventListener('input', () => {
-  clearEdits();
+  state.pages = $('pages').value;
+  clearEdits(state);
   if (state.kind === 'pdf') $('preview').classList.add('loading');
-  schedulePreview();
+  schedulePreview(state);
 });
 // An image's ppi can be matched to the label size, so it re-previews too.
 $('media').addEventListener('change', () => {
-  if (paged(state.kind)) clearEdits();
-  if (state.kind === 'zpl' || paged(state.kind)) preview();
+  if (paged(state.kind)) clearEdits(state);
+  if (state.kind === 'zpl' || paged(state.kind)) requestPreview(state);
 });
 for (const radio of document.querySelectorAll('input[name="layout"]')) {
-  radio.addEventListener('change', () => { state.layout = radio.value; clearEdits(); preview(); });
+  radio.addEventListener('change', () => {
+    state.layout = radio.value;
+    clearEdits(state);
+    requestPreview(state);
+  });
 }
 
 // ---------------------------------------------------------------- drag and drop
@@ -1074,22 +1206,23 @@ $('clear').addEventListener('click', () => chooseFile(null));
 
 $('form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  if (!state.kind) return;
+  const entry = state;
+  if (!entry.kind) return;
   const btn = $('print');
   btn.disabled = true;
   btn.textContent = 'printing…';
-  showResult('info', paged(state.kind) ? 'rendering and sending to lprint…' : 'sending to lprint…');
-  const fields = { ...requestFields(), copies: $('copies').value };
-  if (state.kind === 'zpl') delete fields.media;
+  showResult('info', paged(entry.kind) ? 'rendering and sending to lprint…' : 'sending to lprint…');
+  const fields = { ...requestFields(entry), copies: entry.copies };
+  if (entry.kind === 'zpl') delete fields.media;
   try {
-    const r = await api('/api/print', { method: 'POST', body: formData(fields) });
-    r.jobs.forEach((j) => state.mine.add(j.id));
-    state.lastResult = r;
+    const r = await api('/api/print', { method: 'POST', body: formData(entry, fields) });
+    r.jobs.forEach((j) => app.mine.add(j.id));
+    app.lastResult = r;
     renderPrintResult();
     resetCopies(fields.copies);
   } catch (err) {
     const sent = err.body?.jobs || [];
-    sent.forEach((j) => state.mine.add(j.id));
+    sent.forEach((j) => app.mine.add(j.id));
     showResult('err', err.message);
   } finally {
     btn.textContent = 'print';
@@ -1102,7 +1235,7 @@ $('form').addEventListener('submit', async (e) => {
 // Re-rendered as job states come in from Get-Jobs: lprint accepts a job
 // before the printer has done anything, so "sent" isn't "printed".
 function renderPrintResult(liveJobs) {
-  const r = state.lastResult;
+  const r = app.lastResult;
   if (!r) return;
   const byId = new Map((liveJobs || []).map((j) => [j.id, j]));
   const jobs = r.jobs.map((j) => byId.get(j.id) || j);
@@ -1136,7 +1269,7 @@ function showResult(tone, headline, details = []) {
 }
 
 function clearResult() {
-  state.lastResult = null;
+  app.lastResult = null;
   $('result').hidden = true;
 }
 
@@ -1168,7 +1301,7 @@ async function loadJobs() {
     renderJobs(jobs);
     $('jobs-updated').textContent = 'updated ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
     busy = jobs.some((j) => !terminal.has(j.state));
-    if (state.lastResult) renderPrintResult(jobs);
+    if (app.lastResult) renderPrintResult(jobs);
   } catch (e) {
     lastJobs = null;
     $('jobs-body').replaceChildren(el('tr', {}, el('td', { colSpan: 4, className: 'muted', textContent: e.message })));
@@ -1193,7 +1326,7 @@ function renderJobs(jobs) {
     if (sub) name.append(el('span', { className: 'sub', textContent: sub }));
     const when = el('td', { className: 'when', textContent: ago(j.completed || j.created) });
     if (j.created) when.title = new Date(j.created).toLocaleString();
-    return el('tr', { className: state.mine.has(j.id) ? 'mine' : '' },
+    return el('tr', { className: app.mine.has(j.id) ? 'mine' : '' },
       el('td', { className: 'num', textContent: j.id }),
       name,
       el('td', {}, el('div', { className: 'job-state' },
@@ -1325,23 +1458,31 @@ $('media').addEventListener('change', () => {
 // whole numbers only: the server refuses anything else, so "2.5" isn't saved as 2
 const wholeCopies = (v) => (/^\d+$/.test(v.trim()) ? parseInt(v, 10) : NaN);
 
+// Any entry's copies, as typed, become the default new entries start from.
 $('copies').addEventListener('input', () => {
   const n = wholeCopies($('copies').value);
+  if (n >= 1 && n <= app.maxCopies) app.defaultCopies = String(n);
   if (n === 1) pref.del(PREF_COPIES);
-  else if (n > 1 && n <= state.maxCopies) pref.set(PREF_COPIES, String(n));
+  else if (n > 1 && n <= app.maxCopies) pref.set(PREF_COPIES, String(n));
 });
 
 // After a successful print, unless the count was changed while it was sending.
 function resetCopies(sent) {
   if ($('copies').value !== sent) return;
+  app.defaultCopies = '1';
+  state.copies = '1';
   $('copies').value = '1';
   pref.del(PREF_COPIES);
 }
 
-// Called once the real copies limit (MAX_COPIES) has come from /api/printer.
+// Called once the real copies limit (MAX_COPIES) has come from /api/printer,
+// before any file is open.
 function restoreCopies() {
   const n = wholeCopies(pref.get(PREF_COPIES) || '');
-  if (n > 1 && n <= state.maxCopies) $('copies').value = String(n);
+  if (!(n > 1 && n <= app.maxCopies)) return;
+  app.defaultCopies = String(n);
+  state.copies = app.defaultCopies;
+  $('copies').value = state.copies;
 }
 
 // ---------------------------------------------------------------- feed a label, test label
@@ -1379,7 +1520,7 @@ for (const a of printerActions) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      r.jobs.forEach((j) => state.mine.add(j.id));
+      r.jobs.forEach((j) => app.mine.add(j.id));
       const warn = r.warnings?.length ? ` · ${r.warnings.join(', ')}` : '';
       feedStatus('success', `${a.what} sent · job ${r.jobs[0].id}${warn}`);
       feedTimer = setTimeout(() => feedStatus('neutral', ''), 10000);
@@ -1408,7 +1549,7 @@ $('theme').addEventListener('click', () => {
 // it once and treat it like a chosen file, so it lands on the preview. The
 // query goes at once, so a reload can't ask for a token that's already used.
 const shareErrors = {
-  'too-big': () => `that file is over the ${state.maxMB} MB limit`,
+  'too-big': () => `that file is over the ${app.maxMB} MB limit`,
   unsupported: () => "labelprint can't print that file — share a zpl, pdf, png, jpeg or gif",
   epl2: () => "EPL2 isn't supported — choose zpl or pdf in your shipping tool",
   unreadable: () => "couldn't read the shared file — try sharing it again",
@@ -1453,8 +1594,8 @@ if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').cat
   const shared = fetchShared().catch(() => ({ error: shareErrors.unreadable() }));
   const p = await loadPrinter();
   if (p) {
-    state.maxMB = p.maxUploadMB;
-    state.maxCopies = p.maxCopies;
+    app.maxMB = p.maxUploadMB;
+    app.maxCopies = p.maxCopies;
     $('max-mb').textContent = p.maxUploadMB;
     $('copies').max = p.maxCopies;
   }
