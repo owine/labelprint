@@ -323,6 +323,9 @@ type previewResponse struct {
 	// zpl only: its ^PW/^LL are bigger than the selected labels, or look made
 	// for 300 dpi. A warning, never a block: the zpl still prints unchanged.
 	FitWarning string `json:"fitWarning,omitempty"`
+	// png, jpeg and gif: the image's pixels and the ppi it's sized by. The
+	// rest of the reply is a one-page pdf's.
+	Image *imageInfo `json:"image,omitempty"`
 }
 
 func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
@@ -352,13 +355,16 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		resp.Labels = max(resp.Labels, p.Labels)
 		resp.WidthIn, resp.HeightIn = p.Size.WidthIn, p.Size.HeightIn
 		resp.Pages = dataURLs(p.Pages)
-	case kindPDF:
+	case kindPDF, kindPNG, kindJPEG, kindGIF:
 		if err := s.previewPDF(r.Context(), up, &resp); err != nil {
 			s.fail(w, err)
 			return
 		}
+		if im := resp.Image; im != nil {
+			s.log.Info("preview", "kind", up.Kind, "bytes", len(up.Data), "ppi", im.PPI, "ppi_source", im.PPISource,
+				"labels", resp.Labels)
+		}
 	}
-	// PNG/JPEG: the browser already has the bytes and shows them itself.
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -388,7 +394,7 @@ func (s *server) labelOpts(fields map[string]string, doc *pdfDoc, pages []int, m
 	if err != nil {
 		return labelOpts{}, err
 	}
-	crops, err := parseCrops(fields["crops"], pages, func(p int) (float64, float64) { return doc.geom(p).inches() })
+	crops, err := parseCrops(fields["crops"], pages, func(p int) (float64, float64) { return doc.geom(p).inches() }, doc.noun)
 	if err != nil {
 		return labelOpts{}, err
 	}
@@ -396,12 +402,41 @@ func (s *server) labelOpts(fields map[string]string, doc *pdfDoc, pages []int, m
 	return labelOpts{layout: layout, crops: crops, media: media, known: ok, canvas: canvasFor(media, ok, s.cfg.DPI)}, nil
 }
 
+// docSource is what openPDF opens: an uploaded pdf, or an uploaded image to
+// wrap as a one-page pdf. media is the label size the request resolved
+// through mediaFor, as labelOpts resolves it: an image's ppi can be matched to
+// it, so preview and print must pass the same.
+type docSource struct {
+	up      *upload
+	media   labelSize
+	mediaOK bool
+}
+
 // openPDF opens the upload and checks its page range against MAX_PAGES,
-// before anything is rendered.
-func (s *server) openPDF(ctx context.Context, up *upload) (*pdfDoc, []int, error) {
+// before anything is rendered. An image is decoded and wrapped first (so call
+// it inside the pipeline slot), is always page 1 whatever pages says, and
+// comes with its imageInfo.
+func (s *server) openPDF(ctx context.Context, src docSource) (*pdfDoc, []int, *imageInfo, error) {
+	up := src.up
+	if up.Kind.isImage() {
+		pdf, info, err := wrapImage(ctx, up.Data, up.Kind, src.media, src.mediaOK, s.cfg.DPI)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		doc, err := s.pdf.open(ctx, pdf)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, nil, ctx.Err()
+			}
+			// labelprint's own pdf: a bug, not the upload, so a 500
+			return nil, nil, nil, errors.New("couldn't open the wrapped image")
+		}
+		doc.noun = docNoun{image: true}
+		return doc, []int{1}, &info, nil
+	}
 	doc, err := s.pdf.open(ctx, up.Data)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	pages, err := parsePageRange(up.Fields["pages"], doc.Pages)
 	if err == nil && len(pages) > s.cfg.MaxPages {
@@ -409,30 +444,32 @@ func (s *server) openPDF(ctx context.Context, up *upload) (*pdfDoc, []int, error
 	}
 	if err != nil {
 		doc.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return doc, pages, nil
+	return doc, pages, nil, nil
 }
 
-// previewPDF fills in a pdf's pages, their label boxes and, for the first
-// maxPreviewLabels boxes, the label images exactly as they'd be sent.
-// Detection runs on every selected page so labels is the full count; pages
-// and label images are capped.
+// previewPDF fills in a pdf's (or a wrapped image's) pages, their label
+// boxes and, for the first maxPreviewLabels boxes, the label images exactly
+// as they'd be sent. Detection runs on every selected page so labels is the
+// full count; pages and label images are capped.
 func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewResponse) (err error) {
 	ctx, cancel := context.WithTimeout(ctx, s.pdf.deadline)
 	defer cancel()
-	defer func() { err = tookTooLong(ctx, err) }() // deferred after cancel, so it runs first
+	defer func() { err = tookTooLong(ctx, err, up.Kind) }() // deferred after cancel, so it runs first
 
-	release, err := s.pdf.acquire(ctx) // held for every poppler call, pdfinfo included
+	release, err := s.pdf.acquire(ctx) // held for every poppler call, pdfinfo included, and an image's decode
 	if err != nil {
 		return err
 	}
 	defer release()
-	doc, pages, err := s.openPDF(ctx, up)
+	media, mediaOK := s.mediaFor(up.Fields["media"])
+	doc, pages, info, err := s.openPDF(ctx, docSource{up: up, media: media, mediaOK: mediaOK})
 	if err != nil {
 		return err
 	}
 	defer doc.Close()
+	resp.Image = info
 	o, err := s.labelOpts(up.Fields, doc, pages, up.Fields["media"])
 	if err != nil {
 		return err
@@ -533,7 +570,7 @@ func (s *server) handlePrint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reqs, err := s.buildJobs(r.Context(), up, copies, media, s.requestUser(r))
+	reqs, info, err := s.buildJobs(r.Context(), up, copies, media, s.requestUser(r))
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -565,8 +602,12 @@ func (s *server) handlePrint(w http.ResponseWriter, r *http.Request) {
 			notes = append(notes, pr.Note)
 		}
 	}
-	s.log.Info("print", "kind", up.Kind, "bytes", len(up.Data), "copies", copies, "media", media,
-		"labels", len(reqs), "methods", notes, "jobs", ids, "error", errString(sendErr))
+	attrs := []any{"kind", up.Kind, "bytes", len(up.Data), "copies", copies, "media", media,
+		"labels", len(reqs), "methods", notes, "jobs", ids, "error", errString(sendErr)}
+	if info != nil {
+		attrs = append(attrs, "ppi", info.PPI, "ppi_source", info.PPISource)
+	}
+	s.log.Info("print", attrs...)
 
 	if sendErr != nil {
 		if len(resp.Jobs) > 0 {
@@ -592,9 +633,10 @@ func (s *server) handlePrint(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// buildJobs turns an upload into the Print-Job requests to send. Nothing is
-// sent until every page has rendered, so a bad page can't leave half a job.
-func (s *server) buildJobs(ctx context.Context, up *upload, copies int, media, user string) ([]printRequest, error) {
+// buildJobs turns an upload into the Print-Job requests to send, and for an
+// image its imageInfo (for the log). Nothing is sent until every page has
+// rendered, so a bad page can't leave half a job.
+func (s *server) buildJobs(ctx context.Context, up *upload, copies int, media, user string) ([]printRequest, *imageInfo, error) {
 	base := printRequest{User: user, Media: media, Copies: copies, JobName: up.Filename}
 	switch up.Kind {
 	case kindZPL:
@@ -606,54 +648,57 @@ func (s *server) buildJobs(ctx context.Context, up *upload, copies int, media, u
 		if copies > 1 {
 			base.JobName = fmt.Sprintf("%s ×%d", up.Filename, copies)
 		}
-		return []printRequest{base}, nil
+		return []printRequest{base}, nil, nil
 
-	case kindPNG, kindJPEG:
-		base.Format, base.Scaling, base.Data = up.Kind.mimeType(), "fit", up.Data
-		return []printRequest{base}, nil
-
-	case kindPDF:
+	case kindPDF, kindPNG, kindJPEG, kindGIF:
+		// An image is wrapped as a one-page pdf: every job is one of the
+		// pipeline's canvas-sized PNG labels, never the upload itself.
 		return s.pdfJobs(ctx, up, base, media)
 	}
-	return nil, badRequest("unsupported file")
+	return nil, nil, badRequest("unsupported file")
 }
 
 // tookTooLong turns any failure after a PDF request's deadline passed into
 // one clear reply, whatever poppler or the code under it made of it.
-func tookTooLong(ctx context.Context, err error) error {
+func tookTooLong(ctx context.Context, err error, kind docKind) error {
 	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return &userError{Status: http.StatusGatewayTimeout, Msg: "that pdf took too long to prepare — try fewer pages"}
+		msg := "that pdf took too long to prepare — try fewer pages"
+		if kind.isImage() {
+			msg = "that image took too long to prepare"
+		}
+		return &userError{Status: http.StatusGatewayTimeout, Msg: msg}
 	}
 	return err
 }
 
-// pdfJobs is buildJobs for a PDF: one job per label, within the PDF
-// request deadline.
-func (s *server) pdfJobs(ctx context.Context, up *upload, base printRequest, media string) (out []printRequest, err error) {
+// pdfJobs is buildJobs for a PDF or an image: one job per label, within the
+// PDF request deadline.
+func (s *server) pdfJobs(ctx context.Context, up *upload, base printRequest, media string) (out []printRequest, info *imageInfo, err error) {
 	ctx, cancel := context.WithTimeout(ctx, s.pdf.deadline)
 	defer cancel()
-	defer func() { err = tookTooLong(ctx, err) }() // deferred after cancel, so it runs first
+	defer func() { err = tookTooLong(ctx, err, up.Kind) }() // deferred after cancel, so it runs first
 
-	release, err := s.pdf.acquire(ctx) // held for every poppler call, pdfinfo included
+	release, err := s.pdf.acquire(ctx) // held for every poppler call, pdfinfo included, and an image's decode
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer release()
-	doc, pages, err := s.openPDF(ctx, up)
+	m, mOK := s.mediaFor(media) // as labelOpts resolves it, so the ppi is the preview's
+	doc, pages, info, err := s.openPDF(ctx, docSource{up: up, media: m, mediaOK: mOK})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer doc.Close()
 	o, err := s.labelOpts(up.Fields, doc, pages, media)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// One job per label: LPrint takes a single document per job
 	// (multiple-document-jobs-supported = false). Skipped pages (no
 	// label, beside pages with one) send nothing.
 	plans, err := doc.plan(ctx, pages, o)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// The preview falls back to the whole page when detection fails; print
 	// refuses instead, since what it would send (and skip) isn't what the
@@ -661,10 +706,13 @@ func (s *server) pdfJobs(ctx context.Context, up *upload, base printRequest, med
 	for _, pl := range plans {
 		if pl.Failed {
 			if err := ctx.Err(); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
-			return nil, &userError{Status: http.StatusUnprocessableEntity,
-				Msg: fmt.Sprintf("couldn't find the labels on page %d this time — try again, or choose whole page", pl.Page)}
+			msg := fmt.Sprintf("couldn't find the labels on page %d this time — try again, or choose whole page", pl.Page)
+			if doc.noun.image {
+				msg = "couldn't find the labels in the image this time — try again, or choose whole image"
+			}
+			return nil, nil, &userError{Status: http.StatusUnprocessableEntity, Msg: msg}
 		}
 	}
 	for _, pl := range plans {
@@ -674,7 +722,7 @@ func (s *server) pdfJobs(ctx context.Context, up *upload, base printRequest, med
 		for i, b := range pl.Boxes {
 			l, err := doc.label(ctx, pl.Page, b, o)
 			if err != nil {
-				return nil, &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
+				return nil, nil, &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
 			}
 			pr := base
 			pr.Format, pr.Scaling, pr.Data, pr.Note = kindPNG.mimeType(), "fit", l.PNG, l.Method
@@ -682,7 +730,7 @@ func (s *server) pdfJobs(ctx context.Context, up *upload, base printRequest, med
 			out = append(out, pr)
 		}
 	}
-	return out, nil
+	return out, info, nil
 }
 
 func repeatZPL(data []byte, n int) []byte {

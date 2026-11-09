@@ -16,6 +16,7 @@ const (
 	kindPDF  docKind = "pdf"
 	kindPNG  docKind = "png"
 	kindJPEG docKind = "jpeg"
+	kindGIF  docKind = "gif"
 )
 
 // mimeType is what LPrint is told the document is (document-format).
@@ -27,9 +28,15 @@ func (k docKind) mimeType() string {
 		return "image/png"
 	case kindJPEG:
 		return "image/jpeg"
+	case kindGIF:
+		return "image/gif"
 	}
 	return "" // PDFs are never sent as-is
 }
+
+// isImage reports whether k is an image upload, which goes through the label
+// pipeline wrapped as a one-page PDF (imagepdf.go).
+func (k docKind) isImage() bool { return k == kindPNG || k == kindJPEG || k == kindGIF }
 
 // userError is a problem with the upload itself, shown to the user verbatim
 // with a 4xx status. Field names the form field at fault, if any, so the page
@@ -65,6 +72,8 @@ func detectKind(filename string, data []byte) (docKind, error) {
 		return kindPNG, nil
 	case bytes.HasPrefix(data, []byte{0xFF, 0xD8, 0xFF}):
 		return kindJPEG, nil
+	case bytes.HasPrefix(data, []byte("GIF87a")), bytes.HasPrefix(data, []byte("GIF89a")):
+		return kindGIF, nil
 	}
 	// A ^XA … ^XZ label wins; EPL2 is checked before the .zpl extension so an
 	// EPL2 body saved as .zpl is still refused (LPrint would print it as text).
@@ -81,7 +90,7 @@ func detectKind(filename string, data []byte) (docKind, error) {
 	if ext == ".txt" {
 		return "", &userError{Status: 415, Msg: "that .txt file has no ZPL label in it (no ^XA … ^XZ)"}
 	}
-	return "", &userError{Status: 415, Msg: "unsupported file — send ZPL (.zpl/.txt), PDF, PNG or JPEG"}
+	return "", &userError{Status: 415, Msg: "unsupported file — send ZPL (.zpl/.txt), PDF, PNG, JPEG or GIF"}
 }
 
 // errEPL2 is what an EPL2 upload gets. UPS and FedEx offer EPL2 next to ZPL,

@@ -20,7 +20,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
 LABEL org.opencontainers.image.title="labelprint" \
-      org.opencontainers.image.description="Upload ZPL, PDF, PNG or JPEG files and print them on a label printer via LPrint" \
+      org.opencontainers.image.description="Upload ZPL, PDF, PNG, JPEG or GIF files and print them on a label printer via LPrint" \
       org.opencontainers.image.source="https://github.com/owine/labelprint" \
       org.opencontainers.image.vendor="owine" \
       org.opencontainers.image.licenses="MIT"
@@ -51,6 +51,10 @@ COPY --from=build /out/labelprint /usr/local/bin/labelprint
 # Unprivileged, and HOME on the tmpfs so nothing tries to write elsewhere.
 USER 65532:65532
 ENV HOME=/tmp
+# Go's heap limit, under the 512 MB container in deploy/compose.yaml: two
+# image decodes at their 96 MB estimate, the uploads and the tmpfs PDFs all
+# count against it. Raise it together with mem_limit.
+ENV GOMEMLIMIT=400MiB
 EXPOSE 8080
 
 # Checks only that this process serves HTTP; LPrint being down is a printer

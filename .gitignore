@@ -18,3 +18,14 @@ docs/plans/
 # label PDFs too: only generated fixtures belong in the repo
 *.pdf
 !testdata/*.pdf
+
+# label images too, now a first-class input: only generated fixtures and the app icons belong in the repo
+*.png
+*.jpg
+*.jpeg
+*.gif
+!testdata/*.png
+!testdata/*.jpg
+!testdata/*.jpeg
+!testdata/*.gif
+!web/*.png

@@ -76,11 +76,11 @@ func TestBoxPixels(t *testing.T) {
 func TestParseCrops(t *testing.T) {
 	inch := func(int) (float64, float64) { return 8.5, 11 }
 	sel := []int{1, 2}
-	got, err := parseCrops(`{"1": [[0.1, 0.1, 0.5, 0.5]], "7": [[0,0,0.01,0.01]]}`, sel, inch)
+	got, err := parseCrops(`{"1": [[0.1, 0.1, 0.5, 0.5]], "7": [[0,0,0.01,0.01]]}`, sel, inch, docNoun{})
 	if err != nil || len(got) != 1 || got[1][0] != (box{0.1, 0.1, 0.5, 0.5}) {
 		t.Fatalf("%v %v (page 7 isn't selected: ignored, even though invalid)", got, err)
 	}
-	if got, err := parseCrops("", sel, inch); got != nil || err != nil {
+	if got, err := parseCrops("", sel, inch, docNoun{}); got != nil || err != nil {
 		t.Fatal("empty means none")
 	}
 	bad := map[string]string{
@@ -99,7 +99,7 @@ func TestParseCrops(t *testing.T) {
 			strings.Repeat(`[0,0,1,1],`, 7) + `[0,0,1,1]], "+1": [[0,0,1,1]]}`,
 	}
 	for name, v := range bad {
-		if _, err := parseCrops(v, sel, inch); err == nil {
+		if _, err := parseCrops(v, sel, inch, docNoun{}); err == nil {
 			t.Errorf("%s: no error", name)
 		} else if ue, ok := err.(*userError); !ok || ue.Field != "crops" {
 			t.Errorf("%s: error %v isn't tagged crops", name, err)
@@ -123,7 +123,7 @@ func TestParseLayout(t *testing.T) {
 // really past the edge isn't.
 func TestCropsAtThePageEdge(t *testing.T) {
 	inch := func(int) (float64, float64) { return 8.5, 11 }
-	got, err := parseCrops(`{"1": [[0.5, 0.4, 0.5001, 0.6001]]}`, []int{1}, inch)
+	got, err := parseCrops(`{"1": [[0.5, 0.4, 0.5001, 0.6001]]}`, []int{1}, inch, docNoun{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,5 +139,25 @@ func TestCropsAtThePageEdge(t *testing.T) {
 		if b.valid() {
 			t.Errorf("%+v: off the page, accepted", b)
 		}
+	}
+}
+
+// An image is one page to the pipeline, and its messages say "the image".
+func TestParseCropsNamesTheImage(t *testing.T) {
+	inch := func(int) (float64, float64) { return 4, 6 }
+	for v, want := range map[string]string{
+		`{"1": [[0.6, 0, 0.5, 0.5]]}`: "box 1 on the image runs off the image",
+		`{"1": [[0, 0, 0.05, 0.5]]}`:  "box 1 on the image is too small (under 0.5 in)",
+		`{"1": [[0, 0, 1]]}`:          "box 1 on the image needs 4 numbers",
+		`{"1": []}`:                   "the image has no label boxes",
+	} {
+		_, err := parseCrops(v, []int{1}, inch, docNoun{image: true})
+		if err == nil || err.Error() != want {
+			t.Errorf("%s: %v, want %q", v, err, want)
+		}
+	}
+	_, err := parseCrops(`{"1": [[0.6, 0, 0.5, 0.5]]}`, []int{1}, inch, docNoun{})
+	if err == nil || err.Error() != "box 1 on page 1 runs off the page" {
+		t.Errorf("pdf wording changed: %v", err)
 	}
 }

@@ -37,7 +37,9 @@ func TestDetectKind(t *testing.T) {
 		{"no-extension", "\r\n%PDF-1.4 junk before header", kindPDF, 0},
 		{"x.png", "\x89PNG\r\n\x1a\nrest", kindPNG, 0},
 		{"x.jpg", "\xff\xd8\xff\xe0rest", kindJPEG, 0},
-		{"x.gif", "GIF89a....", "", 415},
+		{"x.gif", "GIF89a....", kindGIF, 0}, // decoding comes later (imagepdf.go)
+		{"x.gif", "GIF87a....", kindGIF, 0},
+		{"x.bmp", "BM....", "", 415},
 		{"empty.zpl", "", "", 400},
 		// EPL2 is refused, whatever it is called; ZPL and plain text are not caught by it.
 		{"label.epl", epl2Sample, "", 415},
@@ -146,6 +148,29 @@ func TestDetectEPL2SetupFirst(t *testing.T) {
 	} {
 		if _, err := detectKind("a.zpl", []byte(d)); !errors.Is(err, errEPL2) {
 			t.Errorf("%q: got %v, want the EPL2 error", d, err)
+		}
+	}
+}
+
+// What an upload's kind is served or sent as, and which kinds go through the
+// label pipeline as images.
+func TestImageKinds(t *testing.T) {
+	for _, c := range []struct {
+		kind  docKind
+		mime  string
+		image bool
+	}{
+		{kindZPL, "application/vnd.zebra-zpl", false},
+		{kindPDF, "", false},
+		{kindPNG, "image/png", true},
+		{kindJPEG, "image/jpeg", true},
+		{kindGIF, "image/gif", true},
+	} {
+		if got := c.kind.mimeType(); got != c.mime {
+			t.Errorf("%s: mime type %q, want %q", c.kind, got, c.mime)
+		}
+		if got := c.kind.isImage(); got != c.image {
+			t.Errorf("%s: isImage %v", c.kind, got)
 		}
 	}
 }

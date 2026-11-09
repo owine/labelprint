@@ -301,7 +301,7 @@ func TestShareRejects(t *testing.T) {
 		status   int    // JSON
 		code     string // redirect's share-error
 	}{
-		{"gif", "x.gif", []byte("GIF89a......"), 0, 415, "unsupported"},
+		{"bmp", "x.bmp", []byte("BM......"), 0, 415, "unsupported"},
 		{"plain text", "notes.txt", []byte("hello"), 0, 415, "unsupported"},
 		{"too big", "big.zpl", bytes.Repeat([]byte("^XA^XZ"), 400), 1024, 413, "too-big"},
 		{"empty", "a.zpl", nil, 0, 400, "unreadable"},
@@ -419,6 +419,10 @@ func TestManifestAndWorker(t *testing.T) {
 	if st.Action != "/share" || st.Method != "POST" || st.Enctype != "multipart/form-data" ||
 		len(st.Params.Files) != 1 || st.Params.Files[0].Name != "file" {
 		t.Fatalf("share_target = %+v", st)
+	}
+	if accept := strings.Join(st.Params.Files[0].Accept, " "); !strings.Contains(accept, "image/gif") ||
+		!strings.Contains(accept, ".gif") {
+		t.Errorf("share_target doesn't accept gifs: %s", accept)
 	}
 	if m.StartURL != "/" || m.Scope != "/" || m.Display != "standalone" {
 		t.Errorf("start_url %q scope %q display %q", m.StartURL, m.Scope, m.Display)

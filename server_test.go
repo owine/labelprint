@@ -235,9 +235,12 @@ func TestPrintZPLRepeatsForCopies(t *testing.T) {
 	}
 }
 
+// An image is never sent as it came: it goes through the label pipeline and
+// LPrint gets a canvas-sized black/white PNG label.
 func TestPrintPNG(t *testing.T) {
+	requirePoppler(t)
 	fake, h := newTestServer(t)
-	img := []byte("\x89PNG\r\n\x1a\n-not-really-but-sniffed")
+	img := label200ppi(t)
 	rec, _ := post(t, h, "/api/print", "label.png", img, map[string]string{"copies": "2", "media": "na_index-4x6_4x6in"})
 	if rec.Code != 200 {
 		t.Fatalf("status %d: %s", rec.Code, rec.Body)
@@ -257,9 +260,14 @@ func TestPrintPNG(t *testing.T) {
 	if got := jobAttr(m, "copies").int(); got != 2 {
 		t.Errorf("copies = %d", got)
 	}
-	if !bytes.Equal(m.Data, img) {
-		t.Error("png must be sent unchanged")
+	if bytes.Equal(m.Data, img) {
+		t.Error("the upload was sent as it came")
 	}
+	g, err := png.Decode(bytes.NewReader(m.Data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPureLabel(t, toGray(g), canvas46)
 }
 
 func TestPrintPDFOneJobPerPage(t *testing.T) {
@@ -324,7 +332,7 @@ func TestPrintRejects(t *testing.T) {
 		maxBytes int64
 		status   int
 	}{
-		{"gif", "x.gif", []byte("GIF89a......"), nil, 0, 415},
+		{"undecodable gif", "x.gif", []byte("GIF89a......"), nil, 0, 415},
 		{"plain text", "notes.txt", []byte("hello"), nil, 0, 415},
 		{"too big", "big.zpl", bytes.Repeat([]byte("^XA^XZ"), 400), nil, 1024, 413},
 		{"copies 0", "a.zpl", []byte("^XA^XZ"), map[string]string{"copies": "0"}, 0, 400},
@@ -346,6 +354,9 @@ func TestPrintRejects(t *testing.T) {
 			if out["error"] == "" {
 				t.Error("no error message")
 			}
+			if c.name == "undecodable gif" && out["error"] != "couldn't read that image" {
+				t.Errorf("error = %q", out["error"])
+			}
 			if len(fake.printJobs()) != 0 {
 				t.Error("a rejected upload reached lprint")
 			}
@@ -354,9 +365,10 @@ func TestPrintRejects(t *testing.T) {
 }
 
 func TestPrintShowsLPrintError(t *testing.T) {
+	requirePoppler(t)
 	fake, h := newTestServer(t)
 	fake.printStatus, fake.printMessage = 0x040A, "Unsupported format 'image/png'."
-	rec, out := post(t, h, "/api/print", "a.png", []byte("\x89PNG\r\n\x1a\n"), nil)
+	rec, out := post(t, h, "/api/print", "a.png", label200ppi(t), nil)
 	if rec.Code != http.StatusBadGateway {
 		t.Fatalf("status %d", rec.Code)
 	}

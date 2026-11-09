@@ -25,6 +25,7 @@
             "application/pdf", ".pdf",
             "image/png", ".png",
             "image/jpeg", ".jpg", ".jpeg",
+            "image/gif", ".gif",
             "application/vnd.zebra-zpl", ".zpl",
             "text/plain", ".txt"
           ]
