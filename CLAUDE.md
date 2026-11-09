@@ -169,7 +169,9 @@ tag and digest, every apk pin, and that `branch=` in one PR.
 
 A package that's already in the base image, directly or through its apk origin (e.g. openssl → libcrypto3/libssl3;
 today `zlib`, for CVE-2026-4738), is pinned only to pull a repository fix in before an `alpine:3.24.x` image ships it. CI's "Flag apk pins the base image already satisfies" step warns once the
-base has caught up; then drop the pin (and its Dockerfile comment) in the PR that bumps the base.
+base has caught up; then drop the pin (and its Dockerfile comment) in the PR that bumps the base. On `main`, the
+`apk-pin-issue` job keeps an issue labelled `apk-pin-satisfied` open while any pin is satisfied, and closes it once none
+are.
 
 The shared `go` preset owns the Go rules; the only Go rules in this repo are the zebrash and gozxing ones (below). The preset gives: `go mod tidy` on every gomod
 update, indirect modules tracked (that's where zebrash's CVEs land), `golang.org/x/*` as one group, and one

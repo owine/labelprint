@@ -152,6 +152,10 @@ jobs:
       # Identical on both legs unless the arches' apk indexes disagree, in
       # which case either value still keys a rebuild correctly.
       apk-closure: ${{ steps.apk.outputs.key }}
+      # Also identical on both legs (same Dockerfile, same base, same 3.24
+      # repository), so whichever leg's value wins is fine for apk-pin-issue.
+      pin-findings: ${{ steps.pincheck.outputs.findings }}
+      pin-check-ok: ${{ steps.pincheck.outputs.ok }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -192,14 +196,20 @@ jobs:
       # alpine:3.24.x image does. This says when it has: every installed base
       # package from the pin's origin, apk's own version order vs the pin. A
       # warning, not a failure. `apk update` because `apk list <name>` for a
-      # package the base doesn't have reads the repository index.
+      # package the base doesn't have reads the repository index. The findings
+      # also go out as outputs (ok says the check really ran: a failed apk
+      # update or docker run isn't "no findings") for apk-pin-issue on main.
       - name: Flag apk pins the base image already satisfies
+        id: pincheck
         env:
           BASE: ${{ steps.apk.outputs.base }}
           PINS: ${{ steps.apk.outputs.pins }}
         run: |
-          docker run --rm -e PINS="$PINS" "$BASE" sh -c '
-            apk update -q >/dev/null 2>&1
+          out=$(docker run --rm -e PINS="$PINS" "$BASE" sh -c '
+            if ! apk update -q >/dev/null 2>&1; then
+              echo PINCHECK-UNAVAILABLE
+              exit 0
+            fi
             for p in $PINS; do
               n=${p%%=*}; want=${p#*=}
               origin=$(apk list "$n" 2>/dev/null | sed -n "s/^$n-[^ ]* [^ ]* {\([^}]*\)}.*/\1/p" | head -n1)
@@ -213,7 +223,21 @@ jobs:
                   echo "$n: base has $pkgver, pin $want still needed"
                 fi
               done
-            done'
+            done') || out=PINCHECK-UNAVAILABLE
+          printf '%s\n' "$out"
+          if printf '%s\n' "$out" | grep -qx PINCHECK-UNAVAILABLE; then
+            echo "::warning file=Dockerfile::apk pin check skipped: apk update or docker run failed"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          findings=$(printf '%s\n' "$out" | sed -n 's/^::warning file=Dockerfile:://p')
+          eof=$(openssl rand -hex 16)
+          {
+            echo "ok=true"
+            echo "findings<<$eof"
+            if [ -n "$findings" ]; then printf '%s\n' "$findings"; fi
+            echo "$eof"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build ${{ matrix.platform }}
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
@@ -302,6 +326,30 @@ jobs:
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: '1'
+
+  # The pin check's warnings land in Renovate base-bump PRs that automerge, where
+  # nobody reads them. On main, this keeps one apk-pin-satisfied issue open
+  # while any pin is satisfied by the base and closes it once none are. It's the
+  # only job that can write issues, and it never runs for a PR.
+  apk-pin-issue:
+    name: apk pin issue
+    needs: docker-build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read  # checkout; a job's permissions replace the workflow's
+      issues: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Keep the apk-pin-satisfied issue in step
+        env:
+          FINDINGS: ${{ needs.docker-build.outputs.pin-findings }}
+          OK: ${{ needs.docker-build.outputs.pin-check-ok }}
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/apk-pin-issue.sh
 
   push-image:
     name: push image (${{ matrix.platform }})
