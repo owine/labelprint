@@ -73,6 +73,7 @@ async function api(path, opts = {}) {
   if (!res.ok) {
     const err = new Error(body?.error || `${res.status} ${res.statusText}`.trim());
     err.body = body;
+    err.status = res.status; // a check's 404 (expired) is retried; other failures aren't
     throw err;
   }
   return body;
@@ -459,16 +460,26 @@ function clearQueue() {
 // never loses a pending preview: the entry left keeps its debounce and its
 // request in flight. A preview e is waiting for that nothing is sending yet
 // goes now, and a check it had paused picks up again.
+//
+// Each check poll has one owner, the open entry or the scheduler. Opening an
+// entry the scheduler is busy with takes its request over (the scheduler is
+// free for the next); the entry left hands an unfinished check back to the
+// scheduler, which keeps polling it if it's idle. Otherwise the poll pauses:
+// its results so far stay in prev.check, and the scheduler resumes it later.
 function openEntry(e) {
   if (e === state) return;
   const prev = state;
-  if (prev.checkAbort) { // paused: its results so far stay in prev.check
-    prev.checkAbort.abort();
-    prev.checkAbort = null;
-  }
   state = e;
   if (e === blank) blank.copies = app.defaultCopies;
   if (app.bg?.e === e) app.bg = null; // the open entry's requests aren't the scheduler's
+  if (prev.checkAbort) {
+    if (!app.bg) {
+      app.bg = { e: prev, what: 'check' };
+    } else {
+      prev.checkAbort.abort();
+      prev.checkAbort = null;
+    }
+  }
   $('copies').value = e.copies;
   $('pages').value = e.pages;
   document.querySelector(`input[name="layout"][value="${e.layout}"]`).checked = true;
@@ -481,13 +492,29 @@ function openEntry(e) {
 
 // The background scheduler sends one request at a time for files that aren't
 // open, in queue order, so the server's two pipeline slots aren't flooded
-// (the open file's own requests use the other, and never wait for it).
+// (the open file's own requests use the other, and never wait for it):
+// previews first, then barcode checks. A check token that's never been polled
+// waits on the server for up to 10 minutes, so checks can wait their turn.
 function kick() {
   if (app.bg) return;
-  const e = app.queue.find((x) => x !== state && needsPreview(x));
-  if (!e) return;
-  app.bg = { e, what: 'preview' };
-  requestPreview(e);
+  const p = app.queue.find((x) => x !== state && needsPreview(x));
+  if (p) {
+    app.bg = { e: p, what: 'preview' };
+    requestPreview(p);
+    return;
+  }
+  const c = app.queue.find((x) => x !== state && x.check && !x.check.done && !x.checkAbort);
+  if (c) {
+    app.bg = { e: c, what: 'check' };
+    pollCheck(c);
+  }
+}
+
+// release frees the scheduler once e's background request (what) is over,
+// and lets it pick the next.
+function release(e, what) {
+  if (app.bg?.e === e && app.bg.what === what) app.bg = null;
+  setTimeout(kick);
 }
 
 // ---------------------------------------------------------------- the list
@@ -540,9 +567,10 @@ function makeRow(e) {
     count: el('span', { className: 'queue-meta' }),
     warn: el('span', { className: 'queue-warn' }),
     copies: el('span', { className: 'queue-meta' }),
+    check: el('span', { className: 'queue-meta' }),
     remove,
   };
-  r.li.append(r.open, r.kind, r.count, r.warn, r.copies, r.remove);
+  r.li.append(r.open, r.kind, r.count, r.warn, r.copies, r.check, r.remove);
   return r;
 }
 
@@ -566,6 +594,18 @@ function fillRow(e, r) {
   r.warn.title = warns.join('; ');
   r.warn.replaceChildren('⚠', el('span', { className: 'visually-hidden', textContent: ` ${warns.join('; ')}` }));
   r.copies.textContent = `×${e.copies}`;
+  r.check.textContent = checkStatus(e);
+  r.check.hidden = !r.check.textContent;
+}
+
+// A row's barcode check: running, waiting for the scheduler, or given up. A
+// label whose barcode couldn't be read is the row's ⚠.
+function checkStatus(e) {
+  if (!paged(e.kind) || !e.check) return '';
+  if (e.checkAbort) return 'checking…';
+  if (!e.check.done) return 'barcode not checked';
+  if (e.check.failed) return "barcode check didn't finish";
+  return '';
 }
 
 function renderQueue() {
@@ -658,8 +698,7 @@ async function requestPreview(e) {
   }
   if (e.abort === ctrl) e.abort = null;
   if (!ctrl.signal.aborted) applyPreview(e, seq, r, err); // else a newer request, or the entry was dropped
-  if (app.bg?.what === 'preview' && app.bg.e === e && !e.abort) app.bg = null;
-  kick();
+  if (!e.abort) release(e, 'preview');
 }
 
 // applyPreview takes a reply (r) or a refusal (err) into the entry's data.
@@ -1202,25 +1241,31 @@ function labelFigures(pg) {
 
 const CHECK_GIVE_UP_MS = 30000;
 
+// stopCheck on a closed entry touches only that entry's poll, never the open
+// one's.
 function stopCheck(e) {
   const had = !!e.check;
   e.checkAbort?.abort();
   e.checkAbort = null;
   e.check = null;
   if (had && e === state) showChecks();
+  release(e, 'check');
 }
 
+// The open entry's check is polled at once; a closed entry's waits for the
+// scheduler.
 function startCheck(e, token) {
   stopCheck(e);
   if (!token) return; // nothing to check, or too big to hold: no lines
   e.check = { token, labels: new Map(), failed: false, done: false };
-  if (e === state) pollCheck(e); // a closed entry's waits until it's opened
+  if (e === state) pollCheck(e);
 }
 
 // pollCheck polls e's check under a new AbortController (e.checkAbort).
-// Re-polls straight away until done; gives up after CHECK_GIVE_UP_MS. A 404
-// (expired or cancelled) or a lost connection is "didn't finish", never an
-// error banner.
+// Re-polls straight away until done; gives up after CHECK_GIVE_UP_MS. A lost
+// connection is "didn't finish", never an error banner. A 404 (the token
+// expired, was evicted or was cancelled) gets one re-preview for a fresh
+// token (retryCheck); a second is "didn't finish".
 async function pollCheck(e) {
   const chk = e.check;
   const ctrl = new AbortController();
@@ -1231,8 +1276,12 @@ async function pollCheck(e) {
     let r;
     try {
       r = await api(`/api/check/${encodeURIComponent(chk.token)}`, { signal });
-    } catch {
+    } catch (err) {
       if (signal.aborted) return;
+      if (err.status === 404 && !e.checkRetried && e.check === chk) {
+        retryCheck(e, ctrl);
+        return;
+      }
       chk.failed = true;
       break;
     }
@@ -1253,6 +1302,19 @@ async function pollCheck(e) {
   if (e.checkAbort === ctrl) e.checkAbort = null;
   if (e.check === chk && e === state) showChecks();
   renderQueue();
+  release(e, 'check');
+}
+
+// retryCheck re-previews e for a fresh check token, once (checkRetried is
+// reset by the user's own edits and by a label-size change): the open entry
+// at once, a closed one through the scheduler.
+function retryCheck(e, ctrl) {
+  e.checkRetried = true;
+  if (e.checkAbort === ctrl) e.checkAbort = null;
+  if (app.bg?.e === e) app.bg = null;
+  e.pending = true;
+  if (e === state) requestPreview(e);
+  else setTimeout(kick);
 }
 
 // A label's result: pending until it has one, "timeout" once the check is
@@ -1385,6 +1447,7 @@ $('copies').addEventListener('input', () => {
 function schedulePreview(e) {
   if (!e.file) return;
   e.pending = true;
+  e.checkRetried = false;
   e.previewSeq++;
   stopCheck(e);
   clearTimeout(e.timer);
@@ -1408,6 +1471,7 @@ $('media').addEventListener('change', () => {
 for (const radio of document.querySelectorAll('input[name="layout"]')) {
   radio.addEventListener('change', () => {
     state.layout = radio.value;
+    state.checkRetried = false; // the user's own edit: a later 404 gets its own retry
     clearEdits(state);
     requestPreview(state);
   });
