@@ -200,54 +200,67 @@ func parseLayout(v string) (string, error) {
 }
 
 // parseCrops reads the crops field: page number → boxes, for selected pages
-// only (other entries are ignored, unchecked). An image's one page is 1; n
-// names it in messages.
-func parseCrops(v string, selected []int, inches func(page int) (w, h float64), n docNoun) (map[int][]box, error) {
+// only (other entries are ignored, unchecked). A box is [x, y, w, h], or
+// [x, y, w, h, flip] where flip is 1 to turn its label 180° and 0 to leave it.
+// The flips come back indexed like the boxes, and nil when no box is flipped.
+// An image's one page is 1; n names it in messages.
+func parseCrops(v string, selected []int, inches func(page int) (w, h float64), n docNoun) (map[int][]box, map[int][]bool, error) {
 	if v == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	var raw map[string][][]float64
 	if err := json.Unmarshal([]byte(v), &raw); err != nil {
-		return nil, fieldError("crops", "the label boxes couldn't be read: %v", err)
+		return nil, nil, fieldError("crops", "the label boxes couldn't be read: %v", err)
 	}
 	sel := map[int]bool{}
 	for _, p := range selected {
 		sel[p] = true
 	}
 	out := map[int][]box{}
+	flips := map[int][]bool{}
+	flipped := false
 	for k, list := range raw {
 		// Only the plain spelling: Atoi also takes "01" and "+1", which would
 		// let one page carry several lists.
 		p, err := strconv.Atoi(k)
 		if err != nil || strconv.Itoa(p) != k {
-			return nil, fieldError("crops", "%q isn't a page number", k)
+			return nil, nil, fieldError("crops", "%q isn't a page number", k)
 		}
 		if !sel[p] {
 			continue
 		}
 		if len(list) == 0 {
-			return nil, fieldError("crops", "%s has no label boxes", n.page(p))
+			return nil, nil, fieldError("crops", "%s has no label boxes", n.page(p))
 		}
 		// Counted with what the page already has, in case a key ever aliases.
 		if k := len(out[p]) + len(list); k > maxBoxesPerPage {
-			return nil, fieldError("crops", "%s has %d label boxes; the most is %d", n.page(p), k, maxBoxesPerPage)
+			return nil, nil, fieldError("crops", "%s has %d label boxes; the most is %d", n.page(p), k, maxBoxesPerPage)
 		}
 		pw, ph := inches(p)
 		for i, a := range list {
-			if len(a) != 4 {
-				return nil, fieldError("crops", "box %d on %s needs 4 numbers", i+1, n.page(p))
+			if len(a) != 4 && len(a) != 5 {
+				return nil, nil, fieldError("crops", "box %d on %s needs 4 or 5 numbers", i+1, n.page(p))
+			}
+			if len(a) == 5 && a[4] != 0 && a[4] != 1 {
+				return nil, nil, fieldError("crops", "box %d on %s has a bad flip value", i+1, n.page(p))
 			}
 			b := box{a[0], a[1], a[2], a[3]}
 			if !b.valid() {
-				return nil, fieldError("crops", "box %d on %s runs off %s", i+1, n.page(p), n.whole())
+				return nil, nil, fieldError("crops", "box %d on %s runs off %s", i+1, n.page(p), n.whole())
 			}
 			if b.W*pw < minBoxIn || b.H*ph < minBoxIn {
-				return nil, fieldError("crops", "box %d on %s is too small (under 0.5 in)", i+1, n.page(p))
+				return nil, nil, fieldError("crops", "box %d on %s is too small (under 0.5 in)", i+1, n.page(p))
 			}
 			b.X, b.Y = max(b.X, 0), max(b.Y, 0)
 			b.W, b.H = min(b.W, 1-b.X), min(b.H, 1-b.Y)
 			out[p] = append(out[p], b)
+			f := len(a) == 5 && a[4] == 1
+			flips[p] = append(flips[p], f)
+			flipped = flipped || f
 		}
 	}
-	return out, nil
+	if !flipped {
+		flips = nil
+	}
+	return out, flips, nil
 }

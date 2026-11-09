@@ -119,7 +119,7 @@ func TestRenderLabelKeepsTrueSize(t *testing.T) {
 	ctx := context.Background()
 	doc := openTest(t, fix2up())
 	b := mustPlan(t, doc, ctx, []int{1}, opts46)[0].Boxes[0] // the top 6 × 4 in label, padded
-	l, err := doc.label(ctx, 1, b, opts46)
+	l, err := doc.label(ctx, 1, b, false, opts46)
 	if err != nil || l.Method != "render" {
 		t.Fatalf("%v %s", err, l.Method)
 	}
@@ -159,7 +159,7 @@ func TestRenderLabelNeverEnlarges(t *testing.T) {
 	if pl.Fallback || len(pl.Boxes) != 1 {
 		t.Fatalf("plan %+v", pl)
 	}
-	l, err := doc.label(ctx, 1, pl.Boxes[0], opts46)
+	l, err := doc.label(ctx, 1, pl.Boxes[0], false, opts46)
 	if err != nil || l.Method != "render" {
 		t.Fatalf("%v %s", err, l.Method)
 	}
@@ -267,7 +267,7 @@ func TestPlanDocTabs(t *testing.T) {
 			// the label is the image's first 1202 px; the tab's bars run from x 1240 to tabEnd, y 200–600
 			wantBoxIn(t, doc, 1, pl.Boxes[0], 0.5, 4.5, 1202/c.ppiX, 800/c.ppiY)
 			wantBoxIn(t, doc, 1, *pl.Tabs[0], 0.5+1240/c.ppiX, 4.5+200/c.ppiY, float64(c.tabEnd-1240)/c.ppiX, 400/c.ppiY)
-			l, err := doc.label(ctx, 1, pl.Boxes[0], opts46)
+			l, err := doc.label(ctx, 1, pl.Boxes[0], false, opts46)
 			if err != nil || l.Method != "native" {
 				t.Fatalf("label: %v %s", err, l.Method)
 			}
@@ -279,12 +279,12 @@ func TestPlanDocTabs(t *testing.T) {
 				tab.X -= (0.5/pw - tab.W) / 2
 				tab.W = 0.5 / pw
 			}
-			if l, err := doc.label(ctx, 1, tab, opts46); err != nil || l.Method != "native" {
+			if l, err := doc.label(ctx, 1, tab, false, opts46); err != nil || l.Method != "native" {
 				t.Fatalf("separate tab: %v %s", err, l.Method)
 			}
 			// "include": label and tab together don't fit 4×6 unscaled, so they're rendered
 			inc := box{X: pl.Boxes[0].X, Y: pl.Boxes[0].Y, W: tab.X + tab.W - pl.Boxes[0].X, H: pl.Boxes[0].H}
-			if l, err := doc.label(ctx, 1, inc, opts46); err != nil || l.Method != "render" {
+			if l, err := doc.label(ctx, 1, inc, false, opts46); err != nil || l.Method != "render" {
 				t.Fatalf("include: %v %s", err, l.Method)
 			}
 		})
@@ -306,7 +306,7 @@ func TestPlanFramedTabFirst(t *testing.T) {
 	if !pl[1].Skip {
 		t.Error("the instructions page after the label should be left out")
 	}
-	if _, err := doc.label(ctx, 1, pl[0].Boxes[0], opts46); err != nil {
+	if _, err := doc.label(ctx, 1, pl[0].Boxes[0], false, opts46); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -334,7 +334,7 @@ func TestLabelMethods(t *testing.T) {
 	ctx := context.Background()
 	doc := openTest(t, fixUPS2up(true, 200))
 	for _, b := range mustPlan(t, doc, ctx, []int{1}, opts46)[0].Boxes {
-		l, err := doc.label(ctx, 1, b, opts46)
+		l, err := doc.label(ctx, 1, b, false, opts46)
 		if err != nil || l.Method != "native" {
 			t.Fatalf("%v %s", err, l.Method)
 		}
@@ -348,7 +348,7 @@ func TestLabelMethods(t *testing.T) {
 	}
 	doc = openTest(t, fixBand())
 	b := mustPlan(t, doc, ctx, []int{1}, opts46)[0].Boxes[0]
-	if l, err := doc.label(ctx, 1, b, opts46); err != nil || l.Method != "render" {
+	if l, err := doc.label(ctx, 1, b, false, opts46); err != nil || l.Method != "render" {
 		t.Fatalf("vector label: %v %s", err, l.Method)
 	}
 }
@@ -444,7 +444,7 @@ func TestHugePagesAreRefusedBeforeRendering(t *testing.T) {
 	tooLarge("label", 1, err)
 	_, err = doc.labelScale(ctx, 1, whole, canvas46)
 	tooLarge("tab scale", 1, err)
-	_, err = doc.label(ctx, 1, whole, opts46) // path A's check render too, if it got that far
+	_, err = doc.label(ctx, 1, whole, false, opts46) // path A's check render too, if it got that far
 	tooLarge("label via path A", 1, err)
 	_, err = doc.renderPages(ctx, []int{1}, previewDPI, true)
 	tooLarge("96 dpi preview", 1, err)
@@ -463,7 +463,7 @@ func TestFallbackBoxCanBeUnderTheCropMinimum(t *testing.T) {
 		t.Fatalf("page 2: skip %v, boxes %+v; want one skipped box under %g in tall", pl.Skip, pl.Boxes, minBoxIn)
 	}
 	b := pl.Boxes[0].round4()
-	if _, err := parseCrops(fmt.Sprintf(`{"2": [[%g, %g, %g, %g]]}`, b.X, b.Y, b.W, b.H), []int{2},
+	if _, _, err := parseCrops(fmt.Sprintf(`{"2": [[%g, %g, %g, %g]]}`, b.X, b.Y, b.W, b.H), []int{2},
 		func(int) (float64, float64) { return 8.5, 11 }, docNoun{}); err == nil {
 		t.Error("sent as it is, the box should be refused")
 	}

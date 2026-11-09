@@ -104,12 +104,16 @@ const separate = (b) => !!b.tab && b.choice === 'separate';
 // flatBoxes is what a page prints, in order: each box, its doc tab as chosen
 // (included in it, or right after it as its own label). A skipped page (no
 // label found while other pages have one) prints nothing until it's included.
+// Each carries its box's flip, so a doc tab printed separately turns with its
+// label.
 function flatBoxes(pg) {
   if (pg.skipped && !pg.edited) return [];
   const out = [];
   for (const b of pg.boxes) {
-    out.push(b.tab && b.choice === 'include' ? unionBox(b, b.tab) : b);
-    if (separate(b)) out.push(growBox(b.tab, pg));
+    const flip = !!b.flip;
+    const a = b.tab && b.choice === 'include' ? unionBox(b, b.tab) : b;
+    out.push({ x: a.x, y: a.y, w: a.w, h: a.h, flip });
+    if (separate(b)) out.push({ ...growBox(b.tab, pg), flip });
   }
   return out;
 }
@@ -128,12 +132,17 @@ function labelNumbers(pg) {
 
 // A detected or fallback box can be under MIN_IN (a skipped page holding one
 // line of text, a small label's box once its page is edited): each box is
-// grown to it before sending, since the server refuses smaller crops.
+// grown to it before sending, since the server refuses smaller crops. A
+// flipped box gets a fifth number, 1, and the server turns its label 180°.
 function cropsField() {
   const out = {};
   for (const pg of state.pdf.pages.values()) {
     if (!pg.edited || !pg.boxes.length) continue;
-    out[pg.page] = flatBoxes(pg).map((b) => growBox(b, pg)).map((b) => [b.x, b.y, b.w, b.h].map(round4));
+    out[pg.page] = flatBoxes(pg).map((b) => {
+      const g = growBox(b, pg);
+      const a = [g.x, g.y, g.w, g.h].map(round4);
+      return b.flip ? [...a, 1] : a;
+    });
   }
   return Object.keys(out).length ? JSON.stringify(out) : '';
 }
@@ -784,6 +793,25 @@ function tabChoice(pg, b, num, li) {
 
 const TAB_ADVICE = '; leave the doc tab off or print it separately';
 
+// The flip under a label turns it 180°, for a sender who put the label on the
+// page upside down. num is the label's print number. The flip belongs to the
+// box, so a doc tab printed separately turns with its label, whichever toggle
+// is pressed. It keeps the doc-tab choice, so it calls markEdited, not
+// boxChanged, and it stays enabled while the page updates: the last press
+// wins. data-tool puts focus back on it after the redraw.
+function flipToggle(pg, b, num) {
+  const btn = el('button', { type: 'button', textContent: 'flip' });
+  btn.dataset.tool = `flip-${num}`;
+  btn.setAttribute('aria-pressed', String(!!b.flip));
+  btn.setAttribute('aria-label', `flip label ${num} of ${pageRef(pg)}`);
+  btn.addEventListener('click', () => {
+    if (!live(pg)) return;
+    b.flip = !b.flip;
+    markEdited(pg);
+  });
+  return el('div', { className: 'seg seg-sm' }, btn);
+}
+
 function labelNote(li, advice) {
   if (!li) return 'not previewed';
   if (li.method === 'native') return `original ${li.ppi} dpi bitmap, unscaled`;
@@ -791,8 +819,9 @@ function labelNote(li, advice) {
   return (m ? `rendered for ${fmtIn(m.w)} × ${fmtIn(m.h)} in` : 'rendered') + scaleNote(li.scale, advice);
 }
 
-// The labels a page makes, in print order. A box with a doc tab carries the
-// tab choice under its label; a tab printed separately follows as its own.
+// The labels a page makes, in print order. Under each: its flip, then, for a
+// box with a doc tab, the tab choice, then the barcode check. A tab printed
+// separately follows as a label of its own.
 function labelFigures(pg) {
   const total = flatBoxes(pg).length;
   if (!total) return []; // nothing printing (a skipped page, or every box removed)
@@ -810,9 +839,9 @@ function labelFigures(pg) {
       if (li || old) fig.append(el('img', { src: (li || old).image, alt: name, loading: 'lazy' }));
       const cap = el('figcaption', { textContent: `${name} · ${pg.stale ? 'updating…' : labelNote(li, included ? TAB_ADVICE : undefined)}` });
       if (li && li.scale < SCALE_WARN) cap.classList.add('warn');
-      fig.append(cap);
-      if (li) fig.append(checkLine(pg.page, k)); // hidden while stale: there's no li
+      fig.append(cap, flipToggle(pg, b, k + 1));
       if (j === 0 && b.tab) fig.append(tabChoice(pg, b, num, li));
+      if (li) fig.append(checkLine(pg.page, k)); // hidden while stale: there's no li
       figs.push(fig);
       k++;
     });

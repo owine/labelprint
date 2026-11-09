@@ -411,12 +411,13 @@ func (s *server) labelOpts(fields map[string]string, doc *pdfDoc, pages []int, m
 	if err != nil {
 		return labelOpts{}, err
 	}
-	crops, err := parseCrops(fields["crops"], pages, func(p int) (float64, float64) { return doc.geom(p).inches() }, doc.noun)
+	crops, flips, err := parseCrops(fields["crops"], pages, func(p int) (float64, float64) { return doc.geom(p).inches() }, doc.noun)
 	if err != nil {
 		return labelOpts{}, err
 	}
 	media, ok := s.mediaFor(mediaName)
-	return labelOpts{layout: layout, crops: crops, media: media, known: ok, canvas: canvasFor(media, ok, s.cfg.DPI)}, nil
+	return labelOpts{layout: layout, crops: crops, flips: flips, media: media, known: ok,
+		canvas: canvasFor(media, ok, s.cfg.DPI)}, nil
 }
 
 // docSource is what openPDF opens: an uploaded pdf, or an uploaded image to
@@ -525,7 +526,7 @@ func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewRespon
 			if budget == 0 || pl.Skip { // a skipped page's box isn't printing, so it gets no image
 				break
 			}
-			l, err := doc.label(ctx, pl.Page, b, o)
+			l, err := doc.label(ctx, pl.Page, b, pl.flip(i), o)
 			if err != nil {
 				return nil, &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
 			}
@@ -753,7 +754,7 @@ func (s *server) pdfJobs(ctx context.Context, up *upload, base printRequest, med
 			continue
 		}
 		for i, b := range pl.Boxes {
-			l, err := doc.label(ctx, pl.Page, b, o)
+			l, err := doc.label(ctx, pl.Page, b, pl.flip(i), o)
 			if err != nil {
 				return nil, nil, &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
 			}
