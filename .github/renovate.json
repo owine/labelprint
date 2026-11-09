@@ -38,6 +38,20 @@
       "addLabels": [
         "needs-review"
       ]
+    },
+    {
+      "description": "gozxing decodes the label images in-process for the barcode check: untrusted input next to label data with names and addresses. It's barely maintained (one tag, v0.1.1 in 2021; master last changed in 2025-07) and pinned to a master pseudo-version, since the tag lacks the *image.Gray fast path and the PR #75 race fix, so updates arrive as digest PRs rather than releases and each needs a human read of its diff: no automerge and a `needs-review` label. Its own groupName takes it out of :automerge's `all non-major dependencies` bundle. Vulnerability-fix PRs still automerge (the fleet's vulnerabilityAlerts is applied with `force`).",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "github.com/makiuchi-d/gozxing"
+      ],
+      "groupName": "gozxing",
+      "automerge": false,
+      "addLabels": [
+        "needs-review"
+      ]
     }
   ]
 }
