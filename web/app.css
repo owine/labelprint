@@ -214,6 +214,20 @@ html[data-theme="dark"] .icon-sun, html:not([data-theme="dark"]) .icon-moon { di
 .result.err  { background: var(--danger-soft);  color: var(--danger);  border-color: transparent; }
 .result.info { background: var(--accent-soft);  color: var(--accent-ink); border-color: transparent; }
 @keyframes rise { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+.result:focus { outline: none; }
+.result:focus-visible { box-shadow: var(--ring); }
+/* one file's line, with its add back */
+.result-line span { overflow-wrap: anywhere; }
+.result-line .btn { margin-left: 8px; padding: 3px 8px; color: inherit; vertical-align: baseline; }
+.result-line .btn:disabled { background: transparent; border-color: transparent; color: inherit; opacity: 0.6; }
+.entry-summary { margin: -8px 0 0; }
+.confirm {
+  border-radius: 8px; padding: 12px 14px; font-size: var(--fs-14); line-height: var(--lh-snug);
+  background: var(--warning-soft); color: var(--warning); display: flex; flex-direction: column; gap: 10px;
+}
+.confirm p { margin: 0; overflow-wrap: anywhere; }
+.confirm-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.drop:has(input:disabled) .drop-target { cursor: not-allowed; opacity: 0.6; }
 
 /* ---------- jobs ---------- */
 .jobs { padding-block: 40px 64px; }

@@ -103,6 +103,7 @@
         <p class="preview-warning" id="preview-warning" role="status" hidden></p>
         <div class="preview-grid" id="preview-grid"></div>
       </div>
+      <p class="caption entry-summary" id="entry-summary" hidden></p>
       </fieldset>
 
       <div class="actions">
@@ -110,7 +111,17 @@
         <span class="caption" id="summary">choose a file to start</span>
       </div>
 
-      <div id="result" class="result" role="status" aria-live="polite" hidden></div>
+      <!-- print all asks here before sending a partly sent file again -->
+      <div class="confirm" id="confirm" role="group" aria-labelledby="confirm-text" hidden>
+        <p id="confirm-text"></p>
+        <div class="confirm-actions">
+          <button class="btn btn-primary btn-sm" type="button" id="confirm-yes">send it again</button>
+          <button class="btn btn-ghost btn-sm" type="button" id="confirm-no">cancel</button>
+        </div>
+      </div>
+
+      <!-- print progress and results only; tabindex so focus can land on it after printing -->
+      <div id="result" class="result" role="status" aria-live="polite" tabindex="-1" hidden></div>
     </form>
 
     <section class="jobs" aria-labelledby="jobs-title">

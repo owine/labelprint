@@ -14,11 +14,12 @@ const el = (tag, props = {}, ...children) => {
 const app = {
   queue: [],           // the entries, in order
   mine: new Set(),     // job ids submitted from this page
-  lastResult: null,    // { jobs, warnings } of the last print, for live updates
+  lastResult: [],      // one line per file of the last print all, for live updates
   maxMB: 20,
   maxCopies: 100,
   defaultCopies: '1',  // the remembered copies count (#13): new entries start from it
-  printing: false,     // print all is running: the queue is locked
+  printing: false,     // print all is running: the queue is locked (lock)
+  confirming: false,   // print all is asking before resending a partly sent file
   bg: null,            // the background scheduler's one request: { e, what: preview | check }
   get open() { return state; },
 };
@@ -241,6 +242,10 @@ function emptyPages(e) {
 // then the boxes on screen belong to no page and edits to them are ignored.
 // A closed entry's pages never match: state is the open entry.
 const live = (pg) => state.pdf.pages.get(pg.page) === pg;
+// Boxes, flips and doc-tab choices aren't form controls, so the editor's
+// disabled fieldset doesn't stop them while print all runs: their handlers
+// check this instead.
+const editable = (pg) => live(pg) && !app.printing;
 
 // An edit to a page: draw it, recount, and re-preview with its crops.
 // Until the new reply lands the page's label images are the old boxes', so
@@ -268,7 +273,7 @@ function boxChanged(pg, b) {
 // Focus moves to the box that took the removed one's place, or to "add label"
 // when none is left, so the keyboard isn't dropped back at the top.
 function removeBox(pg, b) {
-  if (!live(pg)) return;
+  if (!editable(pg)) return;
   const i = pg.boxes.indexOf(b);
   pg.boxes = pg.boxes.filter((x) => x !== b);
   markEdited(pg);
@@ -280,7 +285,7 @@ function removeBox(pg, b) {
 // On a skipped page the whole-page box wasn't printing, so the new box
 // replaces it rather than joining it.
 function addBox(pg) {
-  if (!live(pg)) return;
+  if (!editable(pg)) return;
   const m = state.pdf.media;
   let w = 0.5, h = 0.5;
   if (m) {
@@ -300,14 +305,14 @@ function addBox(pg) {
 // it right after as its own label. It belongs to the box object, so other
 // boxes keep theirs when a tab box is inserted.
 function setChoice(pg, b, choice) {
-  if (b.choice === choice || !live(pg)) return;
+  if (b.choice === choice || !editable(pg)) return;
   b.choice = choice;
   markEdited(pg);
 }
 
 // Drop a page's edits and go back to what detection found.
 function resetPage(pg) {
-  if (!live(pg)) return;
+  if (!editable(pg)) return;
   pg.edited = false;
   pg.stale = true;
   pg.boxes = cloneBoxes(pg.autoBoxes);
@@ -359,6 +364,7 @@ function renderPrinter(p) {
 // in use (or lists the chosen one again) the selection changes with no change
 // event, so every file is re-previewed here, as for a size picked by hand.
 function fillMedia(p) {
+  if (app.printing) return; // the size stays as it is until print all is done
   const sel = $('media');
   const before = sel.value;
   const keep = mediaChoice || pref.get(PREF_MEDIA) || sel.value;
@@ -403,6 +409,10 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 function addFiles(list, { open = false } = {}) {
   const all = [...list];
   if (!all.length) return; // a cancelled picker
+  if (app.printing) {
+    say("printing — add files when it's done");
+    return;
+  }
   const files = all.filter((f) => f.size > 0);
   const msgs = [];
   const skipped = all.length - files.length;
@@ -506,7 +516,7 @@ function openEntry(e) {
 // previews first, then barcode checks. A check token that's never been polled
 // waits on the server for up to 10 minutes, so checks can wait their turn.
 function kick() {
-  if (app.bg) return;
+  if (app.bg || app.printing) return;
   const p = app.queue.find((x) => x !== state && needsPreview(x));
   if (p) {
     app.bg = { e: p, what: 'preview' };
@@ -604,6 +614,7 @@ function fillRow(e, r) {
   r.warn.title = warns.join('; ');
   r.warn.replaceChildren('⚠', el('span', { className: 'visually-hidden', textContent: ` ${warns.join('; ')}` }));
   r.copies.textContent = `×${e.copies}`;
+  r.open.disabled = r.remove.disabled = app.printing;
   r.check.textContent = checkStatus(e);
   r.check.hidden = !r.check.textContent;
 }
@@ -642,6 +653,7 @@ function renderQueue() {
   $('queue').hidden = !n;
   if (!n) disarmClear();
   $('queue-title').textContent = `queue · ${plural(n, 'file')} · ${plural(labels, 'label')}`;
+  queueSummary();
 }
 
 // clear all takes two presses: "clear all", then "clear all — sure?" within
@@ -739,7 +751,8 @@ function applyPreview(e, seq, r, err) {
     e.kind = r.kind;
     e.reply = r;
     if (paged(r.kind)) absorbPdf(e, r);
-    if (e.status === 'previewing' || e.status === 'failed') e.status = 'ready';
+    // a partly sent file stays partly sent through a refused re-preview (sent)
+    if (e.status === 'previewing' || e.status === 'failed') e.status = e.sent.length ? 'partly-sent' : 'ready';
     startCheck(e, r.check); // before drawing, so the label lines start as "checking"
   }
   renderEntry(e);
@@ -933,7 +946,7 @@ function pageFigure(pg) {
     const include = el('button', { type: 'button', className: 'btn btn-ghost btn-sm', textContent: 'include' });
     include.setAttribute('aria-label', `include ${pageRef(pg)}: print it as a label`);
     include.dataset.tool = 'include';
-    include.addEventListener('click', () => { if (!live(pg)) return; pg.edited = true; markEdited(pg); focusTool(pg, 'reset'); });
+    include.addEventListener('click', () => { if (!editable(pg)) return; pg.edited = true; markEdited(pg); focusTool(pg, 'reset'); });
     tools.append(include);
   }
   const add = el('button', { type: 'button', className: 'btn btn-ghost btn-sm', textContent: 'add label' });
@@ -1022,7 +1035,7 @@ function boxEl(pg, b, i, num) {
 let dragging = false;
 
 function startDrag(e, pg, b, node, corner) {
-  if (e.button !== 0 || dragging || !live(pg)) return;
+  if (e.button !== 0 || dragging || !editable(pg)) return;
   e.preventDefault();
   node.focus();
   const entry = state;
@@ -1077,7 +1090,7 @@ function startDrag(e, pg, b, node, corner) {
 }
 
 function keyBox(e, pg, b, node) {
-  if (e.target !== node || !live(pg)) return; // keys on the × are the button's
+  if (e.target !== node || !editable(pg)) return; // keys on the × are the button's
   if (e.key === 'Delete' || e.key === 'Backspace') {
     e.preventDefault();
     if (!(pg.skipped && !pg.edited)) removeBox(pg, b);
@@ -1195,7 +1208,7 @@ function flipToggle(pg, b, num) {
   btn.setAttribute('aria-pressed', String(!!b.flip));
   btn.setAttribute('aria-label', `flip label ${num} of ${pageRef(pg)}`);
   btn.addEventListener('click', () => {
-    if (!live(pg)) return;
+    if (!editable(pg)) return;
     b.flip = !b.flip;
     markEdited(pg);
   });
@@ -1414,34 +1427,105 @@ function zplSource(e, open) {
   });
 }
 
+// Labels whose barcode check hasn't finished (not reached yet, paused or
+// given up): the summary counts them, so it never implies they passed.
+function uncheckedLabels(e) {
+  const chk = e.check;
+  if (!chk || !paged(e.kind)) return 0;
+  let n = 0;
+  for (const pg of e.pdf.pages.values()) {
+    if (pg.stale) continue;
+    for (let k = 0; k < pg.labelImages.length; k++) {
+      const s = chk.labels.get(`${pg.page}:${k}`)?.status;
+      if (s !== 'ok' && s !== 'reads' && s !== 'none') n++;
+    }
+  }
+  return n;
+}
+
+// Why an entry can't be printed yet, or ''. A print-failed entry isn't
+// blocked: print all just sends it again.
+function blocker(e) {
+  if (e.status === 'failed') return e.error?.message || 'refused';
+  if (busy(e)) return 'previewing…';
+  if (e.previewError) return e.previewError; // before the reply: a first preview can be refused a range
+  if (!e.reply) return 'previewing…';
+  if (!copiesOK(e)) return `copies must be a whole number, 1 to ${app.maxCopies}`;
+  const empty = paged(e.kind) ? emptyPages(e) : [];
+  if (empty.length) {
+    return isImage(e)
+      ? 'the image has no labels — add one or choose whole image'
+      : `page ${empty[0].page} has no labels — add one, reset it, or leave it out of the page range`;
+  }
+  return '';
+}
+
+// The open file's own line, under its preview, then the list and the
+// queue's line.
 function updateSummary() {
+  entrySummary();
   renderQueue();
+}
+
+// The queue's line, by the print button (renderQueue calls it): the button
+// names the labels it will print, or the line names the first file holding
+// it back and why.
+function queueSummary() {
   const btn = $('print');
+  const sum = $('summary');
+  let total = 0;
+  let unread = 0;
+  let unchecked = 0;
+  let first = '';
+  for (const e of app.queue) {
+    const why = blocker(e);
+    if (why) {
+      first ||= `${e.file.name}: ${why}`;
+      continue;
+    }
+    total += labelUnits(e) * wholeCopies(e.copies);
+    unread += unreadLabels(e);
+    unchecked += uncheckedLabels(e);
+  }
+  btn.disabled = app.printing || app.confirming || !app.queue.length || !!first;
+  if (app.printing) return; // the button and #result show progress
+  btn.textContent = app.queue.length && !first ? `print ${plural(total, 'label')}` : 'print';
+  if (!app.queue.length) sum.textContent = 'choose a file to start';
+  else if (first) sum.textContent = first;
+  else {
+    sum.textContent = [
+      plural(total, 'label'),
+      unread ? `${plural(unread, 'label')} whose barcode couldn't be read` : '',
+      unchecked ? `${unchecked} not checked yet` : '',
+    ].filter(Boolean).join(' · ');
+  }
+}
+
+// The open file's line: its labels and copies, or what's wrong with it.
+function entrySummary() {
+  const sum = $('entry-summary');
   const copies = wholeCopies(state.copies);
-  const copiesOK = copies >= 1 && copies <= app.maxCopies;
-  if (copiesOK) $('copies').removeAttribute('aria-invalid');
+  const ok = copiesOK(state);
+  if (ok) $('copies').removeAttribute('aria-invalid');
   else $('copies').setAttribute('aria-invalid', 'true');
   const empty = paged(state.kind) ? emptyPages(state) : [];
-  btn.disabled = !state.kind || !copiesOK || empty.length > 0 || !!state.previewError;
-  const sum = $('summary');
-  if (!state.file) { sum.textContent = 'choose a file to start'; return; }
-  if (!state.kind) { sum.textContent = ''; return; }
-  if (state.previewError) { sum.textContent = state.previewError; return; }
-  if (!copiesOK) { sum.textContent = `copies: a whole number, 1 to ${app.maxCopies}`; return; }
-  let units = 1;
-  if (paged(state.kind)) units = pdfLabelCount(state);
-  const total = units * copies;
-  if (empty.length) {
-    sum.textContent = isImage()
+  let text = '';
+  if (!state.kind) text = '';
+  else if (state.previewError) text = state.previewError;
+  else if (!ok) text = `copies: a whole number, 1 to ${app.maxCopies}`;
+  else if (empty.length) {
+    text = isImage()
       ? 'image has no labels — add one or choose whole image'
       : `page ${empty[0].page} has no labels — add one, reset it, or leave it out of the page range`;
-    return;
+  } else {
+    const units = labelUnits(state);
+    const total = units * copies;
+    const unread = unreadLabels(state);
+    text = (copies > 1 && units > 1 ? `${units} labels × ${copies} copies = ${total} labels` : plural(total, 'label')) +
+      (unread ? ` · ${plural(unread, 'label')} whose barcode couldn't be read` : '');
   }
-  const unread = unreadLabels(state);
-  sum.textContent = (copies > 1 && units > 1
-    ? `${units} labels × ${copies} copies = ${total} labels`
-    : `${total} label${total === 1 ? '' : 's'}`) +
-    (unread ? ` · ${unread} label${unread === 1 ? '' : 's'} whose barcode couldn't be read` : '');
+  sum.textContent = text;
+  sum.hidden = !text;
 }
 // #copies and #pages mirror the open entry: their listeners write into it.
 $('copies').addEventListener('input', () => {
@@ -1527,62 +1611,202 @@ $('file').addEventListener('change', (e) => {
 });
 $('clear').addEventListener('click', () => removeEntry(state));
 
-// ---------------------------------------------------------------- print
+// ---------------------------------------------------------------- print all
 
-$('form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const entry = state;
-  if (!entry.kind) return;
-  const btn = $('print');
-  btn.disabled = true;
-  btn.textContent = 'printing…';
-  showResult('info', paged(entry.kind) ? 'rendering and sending to lprint…' : 'sending to lprint…');
-  const fields = { ...requestFields(entry), copies: entry.copies };
-  if (entry.kind === 'zpl') delete fields.media;
-  try {
-    const r = await api('/api/print', { method: 'POST', body: formData(entry, fields) });
-    r.jobs.forEach((j) => app.mine.add(j.id));
-    app.lastResult = r;
-    renderPrintResult();
-    resetCopies(fields.copies);
-  } catch (err) {
-    const sent = err.body?.jobs || [];
-    sent.forEach((j) => app.mine.add(j.id));
-    showResult('err', err.message);
-  } finally {
-    btn.textContent = 'print';
-    updateSummary();
-    loadJobs();
-    loadPrinter();
-  }
+const jobsText = (ids) => (ids.length === 1 ? `job ${ids[0]}` : `jobs ${ids.join(', ')}`);
+
+// Every file in order, one request each, awaited in turn, at the label size
+// as it is when the button is pressed. A failure doesn't stop the rest. Files
+// that printed leave the queue; each has a line in the result with "add
+// back".
+$('form').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  if (app.printing || $('print').disabled) return;
+  const partly = app.queue.filter((e) => e.status === 'partly-sent');
+  if (partly.length && !(await confirmResend(partly))) return;
+  if ($('print').disabled) return; // something changed while it asked
+  await printAll();
 });
 
-// Re-rendered as job states come in from Get-Jobs: lprint accepts a job
-// before the printer has done anything, so "sent" isn't "printed".
-function renderPrintResult(liveJobs) {
-  const r = app.lastResult;
-  if (!r) return;
-  const byId = new Map((liveJobs || []).map((j) => [j.id, j]));
-  const jobs = r.jobs.map((j) => byId.get(j.id) || j);
-  const failed = jobs.filter((j) => j.state === 'aborted' || j.state === 'canceled');
-  const done = jobs.filter((j) => j.state === 'completed').length;
-  const ids = jobs.map((j) => j.id);
-  const idText = ids.length === 1 ? `job ${ids[0]}` : `jobs ${ids[0]}–${ids[ids.length - 1]}`;
-
+async function printAll() {
+  lock(true);
+  const media = $('media').value;
+  const run = [...app.queue];
   const lines = [];
-  let tone;
-  if (failed.length) {
-    tone = 'err';
-    lines.push(`${idText}: ${failed.length} ${failed[0].state}`);
-    for (const j of failed) lines.push(`job ${j.id}: ${j.message || j.reasons?.join(', ') || j.state}`);
-  } else if (done === jobs.length) {
-    tone = 'ok';
-    lines.push(`printed · ${idText}`);
-  } else {
-    tone = r.warnings?.length ? 'warn' : 'info';
-    lines.push(`sent to lprint · ${idText} · ${done ? `${done} of ${jobs.length} done` : jobs[0].state}`);
+  for (const [i, e] of run.entries()) {
+    const n = `${i + 1} of ${run.length}`;
+    $('print').textContent = `printing ${n}…`;
+    showResult('info', `printing ${n} — ${e.file.name}…`);
+    const fields = { ...requestFields(e, media), copies: e.copies };
+    if (e.kind === 'zpl') delete fields.media; // the zpl sets its own size
+    const line = { entry: e, name: e.file.name, media, ok: true, jobs: [], warnings: [], message: '', added: false };
+    try {
+      const r = await api('/api/print', { method: 'POST', body: formData(e, fields) });
+      line.jobs = r.jobs;
+      line.warnings = r.warnings || [];
+    } catch (err) {
+      // a 502 after some jobs went carries them; the message says how many
+      line.ok = false;
+      line.jobs = err.body?.jobs || [];
+      line.message = err.message.replace(/^sent \d+ of \d+ jobs, then: /, '');
+      e.status = line.jobs.length ? 'partly-sent' : 'print-failed';
+      e.sent = line.jobs.map((j) => j.id);
+    }
+    line.jobs.forEach((j) => app.mine.add(j.id));
+    lines.push(line);
   }
-  showResult(tone, lines[0], [...lines.slice(1), ...(r.warnings || [])]);
+  for (const l of lines) {
+    if (!l.ok) continue;
+    dropEntry(l.entry);
+    app.queue.splice(app.queue.indexOf(l.entry), 1);
+  }
+  if (lines.some((l) => l.ok)) resetCopies();
+  app.lastResult = lines;
+  lock(false);
+  // the first file that didn't print opens; with none left, focus goes to the result
+  const failed = app.queue.find((e) => e.status === 'print-failed' || e.status === 'partly-sent');
+  openEntry(failed || app.queue[0] || blank);
+  renderPrintResult();
+  updateSummary();
+  if (failed) rows.get(failed.id).open.focus();
+  else $('result').focus();
+  loadJobs();
+  loadPrinter();
+}
+
+// While print all runs nothing that changes what's being printed can be
+// used: the list, adding files, the label size and the open file's editor
+// (a disabled fieldset), feed and the test label (their jobs could land
+// between two files), add back. Boxes aren't form controls, so their
+// handlers check editable(). The scheduler pauses.
+function lock(on) {
+  app.printing = on;
+  $('editor').disabled = on;
+  $('file').disabled = on;
+  for (const a of printerActions) $(a.id).disabled = on;
+  if (on) disarmClear();
+  $('clear-all').disabled = on;
+  renderQueue();
+  updateSummary();
+  if (!on) kick();
+}
+
+// A file that was partly sent would be sent whole again: the page asks
+// first, in the page, before locking.
+function confirmResend(list) {
+  const box = $('confirm');
+  $('confirm-text').textContent = list.length === 1
+    ? `${list[0].file.name} was partly sent (${jobsText(list[0].sent)}) — send all of it again? ` +
+      'Change its page range first to send only the rest.'
+    : `${list.map((e) => `${e.file.name} (${jobsText(e.sent)})`).join(', ')} were partly sent — send all of them ` +
+      'again? Change their page ranges first to send only the rest.';
+  box.hidden = false;
+  app.confirming = true;
+  updateSummary();
+  $('confirm-yes').focus();
+  return new Promise((resolve) => {
+    const done = (yes) => {
+      box.hidden = true;
+      box.onkeydown = $('confirm-yes').onclick = $('confirm-no').onclick = null;
+      app.confirming = false;
+      updateSummary();
+      if (!yes) $('print').focus();
+      resolve(yes);
+    };
+    $('confirm-yes').onclick = () => done(true);
+    $('confirm-no').onclick = () => done(false);
+    box.onkeydown = (e) => { if (e.key === 'Escape') done(false); };
+  });
+}
+
+// Add back puts a printed file back at the end of the queue with its edits,
+// and re-previews it, once per result line. A label size changed since it
+// printed clears its edits, as any size change does.
+function addBack(l) {
+  if (app.printing || l.added) return;
+  if (app.queue.length >= MAX_QUEUE) {
+    say(`the queue holds ${MAX_QUEUE} files — ${l.name} wasn't added`);
+    return;
+  }
+  l.added = true;
+  const e = l.entry;
+  e.status = 'ready';
+  e.sent = [];
+  e.checkRetried = false;
+  if (l.media !== $('media').value) clearEdits(e);
+  e.pending = true;
+  app.queue.push(e);
+  if (state === blank) openEntry(e);
+  renderQueue();
+  kick();
+  renderPrintResult();
+  rows.get(e.id).open.focus();
+}
+
+// One line per file, re-rendered as job states come in from Get-Jobs:
+// lprint accepts a job before the printer has done anything, so "sent" isn't
+// "printed". Get-Jobs lists only lprint's 15 most recent, so each line keeps
+// its own jobs' states, and a job that has left the list without finishing
+// shows as "unknown", not as still pending. Printer warnings repeated by
+// each file's reply are shown once.
+function renderPrintResult(liveJobs) {
+  const lines = app.lastResult;
+  if (!lines?.length) return;
+  if (liveJobs) {
+    const byId = new Map(liveJobs.map((j) => [j.id, j]));
+    for (const l of lines) {
+      l.jobs = l.jobs.map((j) => byId.get(j.id) || (terminal.has(j.state) ? j : { ...j, state: 'unknown' }));
+    }
+  }
+  const focused = document.activeElement?.dataset?.addback;
+  const sent = lines.filter((l) => l.ok);
+  const jobsFailed = lines.flatMap((l) => l.jobs.filter((j) => j.state === 'aborted' || j.state === 'canceled'));
+  const allDone = sent.length === lines.length && lines.every((l) => l.jobs.every((j) => j.state === 'completed'));
+  const warnings = [...new Set(lines.flatMap((l) => l.warnings))];
+  let tone = warnings.length ? 'warn' : 'info';
+  if (allDone) tone = 'ok';
+  if (sent.length < lines.length || jobsFailed.length) tone = 'err';
+  const headline = sent.length === lines.length
+    ? `${allDone ? 'printed' : 'sent'} ${plural(lines.length, 'file')}`
+    : `sent ${sent.length} of ${plural(lines.length, 'file')}`;
+  const items = lines.map((l, i) => {
+    const li = el('li', { className: 'result-line' }, el('span', { textContent: resultText(l) }));
+    if (l.ok) {
+      const btn = el('button', { type: 'button', className: 'btn btn-ghost btn-sm', textContent: l.added ? 'added back' : 'add back' });
+      btn.setAttribute('aria-label', `add ${l.name} back to the queue`);
+      btn.dataset.addback = i;
+      btn.disabled = l.added || app.printing;
+      btn.addEventListener('click', () => addBack(l));
+      li.append(btn);
+    }
+    return li;
+  });
+  const details = [
+    ...jobsFailed.map((j) => `job ${j.id}: ${j.message || j.reasons?.join(', ') || j.state}`),
+    ...warnings,
+  ].map((d) => el('li', { textContent: d }));
+  const box = $('result');
+  box.className = 'result ' + tone;
+  box.replaceChildren(el('strong', { textContent: headline }), el('ul', {}, ...items, ...details));
+  box.hidden = false;
+  if (focused !== undefined) box.querySelector(`[data-addback="${focused}"]`)?.focus();
+}
+
+// "pkg1.png · sent · jobs 41, 42", "return.pdf · failed: …",
+// "pkg2.png · partly sent · jobs 41, 42, then: …"
+function resultText(l) {
+  const ids = l.jobs.map((j) => j.id);
+  if (!l.ok) {
+    return ids.length ? `${l.name} · partly sent · ${jobsText(ids)}, then: ${l.message}` : `${l.name} · failed: ${l.message}`;
+  }
+  const failed = l.jobs.filter((j) => j.state === 'aborted' || j.state === 'canceled');
+  const done = l.jobs.filter((j) => j.state === 'completed').length;
+  const unknown = l.jobs.filter((j) => j.state === 'unknown').length;
+  let what;
+  if (failed.length) what = `${failed.length} ${failed[0].state}`;
+  else if (done === l.jobs.length) what = 'printed';
+  else what = 'sent' + (done ? ` · ${done} of ${l.jobs.length} done` : '') + (unknown ? ` · ${unknown} unknown` : '');
+  return `${l.name} · ${what} · ${jobsText(ids)}`;
 }
 
 function showResult(tone, headline, details = []) {
@@ -1621,7 +1845,8 @@ async function loadJobs() {
     renderJobs(jobs);
     $('jobs-updated').textContent = 'updated ' + new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
     busy = jobs.some((j) => !terminal.has(j.state));
-    if (app.lastResult) renderPrintResult(jobs);
+    // during print all #result shows progress; the last run's lines come back after
+    if (app.lastResult.length && !app.printing) renderPrintResult(jobs);
   } catch (e) {
     lastJobs = null;
     $('jobs-body').replaceChildren(el('tr', {}, el('td', { colSpan: 4, className: 'muted', textContent: e.message })));
@@ -1787,12 +2012,11 @@ $('copies').addEventListener('input', () => {
   else if (n > 1 && n <= app.maxCopies) pref.set(PREF_COPIES, String(n));
 });
 
-// After a successful print, unless the count was changed while it was sending.
-function resetCopies(sent) {
-  if ($('copies').value !== sent) return;
+// After a print all in which something printed, new files start from 1
+// again. Files that didn't print keep their own count.
+function resetCopies() {
   app.defaultCopies = '1';
-  state.copies = '1';
-  $('copies').value = '1';
+  blank.copies = '1';
   pref.del(PREF_COPIES);
 }
 
@@ -1848,7 +2072,7 @@ for (const a of printerActions) {
     } catch (e) {
       feedStatus('danger', `${a.what} failed: ${e.message}`);
     } finally {
-      for (const o of printerActions) $(o.id).disabled = false;
+      for (const o of printerActions) $(o.id).disabled = app.printing;
       btn.textContent = idle;
       loadJobs();
       loadPrinter();
