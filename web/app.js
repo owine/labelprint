@@ -355,8 +355,12 @@ function renderPrinter(p) {
   }
 }
 
+// It runs every 30 s as well as at boot. When lprint stops listing the size
+// in use (or lists the chosen one again) the selection changes with no change
+// event, so every file is re-previewed here, as for a size picked by hand.
 function fillMedia(p) {
   const sel = $('media');
+  const before = sel.value;
   const keep = mediaChoice || pref.get(PREF_MEDIA) || sel.value;
   sel.replaceChildren();
   for (const m of p.media) {
@@ -364,6 +368,12 @@ function fillMedia(p) {
   }
   sel.value = keep && p.media.some((m) => m.name === keep) ? keep : p.defaultMedia;
   if (!sel.value && sel.options.length) sel.selectedIndex = 0;
+  if (!before || sel.value === before || !app.queue.length) return;
+  sizeChanged();
+  const label = p.media.find((m) => m.name === sel.value)?.label || sel.value;
+  say(sel.value === keep
+    ? `lprint lists ${label} again — every file was re-previewed at it, and its edits were cleared`
+    : `lprint no longer lists that label size — every file was re-previewed at ${label}, and its edits were cleared`);
 }
 
 // ---------------------------------------------------------------- file choice
@@ -1463,11 +1473,29 @@ $('pages').addEventListener('input', () => {
   if (state.kind === 'pdf') $('preview').classList.add('loading');
   schedulePreview(state);
 });
-// An image's ppi can be matched to the label size, so it re-previews too.
-$('media').addEventListener('change', () => {
-  if (paged(state.kind)) clearEdits(state);
-  if (state.kind === 'zpl' || paged(state.kind)) requestPreview(state);
-});
+// The label size is shared by the queue (one roll in the printer), so a new
+// size makes every preview stale: each entry's edits are cleared and it's
+// re-previewed, the open one at once and the rest through the scheduler. That
+// includes an entry whose first preview is still on its way (asked for at the
+// old size), and leaves out one refused for its type. An image's ppi can be
+// matched to the label size, so it re-previews too.
+function sizeChanged() {
+  for (const e of app.queue) {
+    if (e.status === 'failed') continue;
+    clearTimeout(e.timer);
+    e.timer = null;
+    e.abort?.abort();
+    e.abort = null;
+    if (app.bg?.e === e) app.bg = null;
+    clearEdits(e);
+    e.pending = true;
+    e.checkRetried = false;
+  }
+  if (needsPreview(state)) requestPreview(state);
+  renderQueue();
+  kick();
+}
+$('media').addEventListener('change', sizeChanged);
 for (const radio of document.querySelectorAll('input[name="layout"]')) {
   radio.addEventListener('change', () => {
     state.layout = radio.value;
