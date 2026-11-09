@@ -299,6 +299,14 @@ tr.mine td.num { color: var(--accent); }
 .crop-tab.tall .crop-del { top: 24px; }
 .label-item.stale img { opacity: 0.4; }
 
+/* ---------- barcode check ---------- */
+.check-line { margin: 0; font-family: var(--font-mono); font-size: var(--fs-12); color: var(--fg-3); overflow-wrap: anywhere; }
+.check-line.ok { color: var(--success); }
+.check-line.warn { color: var(--warning); }
+.zpl-tracking { display: flex; flex-direction: column; gap: 4px; }
+.zpl-tracking .caption { margin: 0; overflow-wrap: anywhere; }
+.tracking { font-family: var(--font-mono); user-select: text; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
