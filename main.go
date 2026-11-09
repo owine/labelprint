@@ -88,8 +88,11 @@ func main() {
 		log.Error("bad configuration", "error", err)
 		os.Exit(2)
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	s := &server{cfg: cfg, ipp: ipp, pdf: newPDFRenderer(cfg.DPI, log), zpl: newZPLRenderer(cfg.DPI),
-		shares: newShareStore(cfg.MaxUpload), log: log}
+		shares: newShareStore(cfg.MaxUpload), checks: newCheckStore(log), log: log, baseCtx: ctx}
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -100,11 +103,9 @@ func main() {
 		IdleTimeout:       2 * time.Minute,
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
 	go probeLPrint(ctx, log, ipp)
 	go s.shares.janitor(ctx, time.Minute)
+	go s.checks.janitor(ctx, time.Minute)
 
 	errc := make(chan error, 1)
 	go func() {

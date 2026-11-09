@@ -24,7 +24,11 @@ example stack. The repo is public: keep real hostnames, addresses and deployment
 | `imagepdf.go` | images: header checks before decoding (side, JPEG scan count, decode-memory estimate), the ppi rule, decode to gray on white, and a minimal one-page PDF writer, so PNG/JPEG/GIF run through the PDF pipeline as page 1 |
 | `labels.go` | per page: which boxes (and the skip rule), and each box's label (path A, else B) |
 | `bitmap.go` | gray-image helpers: threshold, rotate, trim, centre |
-| `zpl.go` | ZPL preview via zebrash (the only module dependency, `github.com/Gobbo89/zebrash`): panic recovery, timeout, canvas from `^PW`/`^LL` or the media |
+| `zpl.go` | ZPL preview via zebrash (`github.com/Gobbo89/zebrash`; zebrash and gozxing are the module dependencies): panic recovery, timeout, canvas from `^PW`/`^LL` or the media |
+| `zpltrack.go` | ZPL tracking numbers from `^BC`/`^B3` field data (Code 128 invocation codes applied); `^FH`, `^FN` and `^DF` skipped |
+| `classify.go` | tracking numbers by format, in rank order: UPS `1Z`, USPS IMpb (GS1 split or by length), FedEx Ground/Express, USPS plain. Never plain 12/15 digits. The FedEx lengths and slices are from third-party sources, not a FedEx-published spec |
+| `barcode.go` | the barcode check's decode with gozxing (`github.com/makiuchi-d/gozxing`): whole image, row bands, column bands, QR, early stop on rank 1–2; per label a size guard, downscale and `recover` |
+| `check.go` | the check store behind `GET /api/check/{token}`: tokens, TTL, cap, budget, one decode slot with a 2 s timeout, cancelling a token nobody polls |
 | `media.go` | turns LPrint's `media-supported` PWG names into dropdown labels and sizes |
 | `server.go` | HTTP handlers, upload limits, the print flow, cross-origin protection, security headers |
 | `maintenance.go` | `POST /api/printer/maintenance`: "feed a label" (a one-dot box) and "test label" as ZPL jobs. No remote calibrate: that's SmartCal at the printer |
@@ -70,6 +74,12 @@ Verified against the live LPrint (Get-Printer-Attributes) and the LPrint/PAPPL s
 - zebrash has no panic recovery of its own and is fed untrusted uploads, so `zpl.go` recovers and times out around
   it. The fork's malformed-ZPL limits don't change that: keep both. A failed ZPL preview is reported in the page
   (`previewError`) and must never block printing.
+- gozxing is fed untrusted label images, so the barcode check gives it a `recover`, a 2 s timeout, a size guard
+  (under 8 px refused, over 16 Mpx halved) and fuzzing (`FuzzBarcodeDecode`). Each decode builds its own
+  `BinaryBitmap`: a shared one is the race fixed upstream in PR #75. gozxing takes no context, so a decode that
+  times out keeps the one check slot until it returns, which stops all checks meanwhile (logged once). The check
+  is a hint and never blocks printing. The `bench` CI job warns over 250 ms a label on arm64; then cut the bands
+  (e.g. to 6 per orientation).
 - The printer can report `media-empty` while printing fine, so state reasons are shown as warnings and never block a
   print.
 - Cancel-Job is in `operations-supported` and takes `printer-uri` + `job-id`. PAPPL refuses a completed, canceled or
@@ -89,7 +99,8 @@ Never send to port 9100 directly. Every job must go through LPrint so it appears
 Labels contain names and addresses. Don't add any outside service (Labelary etc.) for rendering or previews;
 ZPL previews use zebrash in-process for exactly this reason. Don't log
 filenames or document contents (logs carry
-kind, size, copies, media, an image's ppi and ppi source, and job ids only), and never commit real label
+kind, size, copies, media, an image's ppi and ppi source, barcode-check status counts, and job ids only; never a
+tracking number, gozxing's error text or a panic value), and never commit real label
 files (`.gitignore` blocks `*.zpl`, `*.pdf`, `*.png`, `*.jpg`,
 `*.jpeg` and `*.gif` outside `testdata/`, the app icons excepted). The page loads nothing third-party; the CSP is
 `default-src 'self'`.
@@ -123,6 +134,8 @@ refusing the import.
 go test -race ./...                                  # PDF tests skip without poppler
 UPDATE_FIXTURES=1 go test -run Fixture               # after changing makeLabelPDF
 go test -run '^$' -fuzz '^FuzzZPLPreview$' -fuzztime 5m .  # crashers land in testdata/fuzz/
+go test -run '^$' -fuzz '^FuzzBarcodeDecode$' -fuzztime 5m .
+go test -run '^$' -bench '^BenchmarkDecodeLabel$' .         # one worst-case label's barcode check
 docker buildx build --platform linux/arm64 -t labelprint:test --load .
 docker run --rm -p 8080:8080 --read-only --cap-drop ALL --tmpfs /tmp labelprint:test
 ```
@@ -131,7 +144,9 @@ Lint like CI: `gofmt -l .`, `go vet ./...`, hadolint on `Dockerfile`, `yamllint 
 
 ## CI/CD
 
-- `ci.yml`: lint and `go test`, then `docker-build` builds each arch on a native runner (`ubuntu-26.04` and
+- `ci.yml`: lint and `go test` (with 30 s of fuzzing for each of `FuzzZPLPreview` and `FuzzBarcodeDecode`), and
+  `bench`, which times the barcode check of a worst-case label on `ubuntu-26.04-arm` for the PR. Then
+  `docker-build` builds each arch on a native runner (`ubuntu-26.04` and
   `ubuntu-26.04-arm`) and smoke-tests it hardened: refuses to start without `LPRINT_URI`, read-only, no caps,
   non-root, PDF, image and ZPL render, font substitution, cross-site POST refused. The Trivy HIGH/CRITICAL gate runs before
   anything is pushed. On `main`, `push-image` pushes each arch by digest, `publish-image` joins them and tags
@@ -152,7 +167,7 @@ Renovate extends the `owine/renovate-config` presets (base, automerge, go, docke
 Alpine line set by `branch=v3.XX` in `.github/renovate.json`. When the Alpine base crosses a release line, bump the base
 tag and digest, every apk pin, and that `branch=` in one PR.
 
-The shared `go` preset owns the Go rules; the only Go rule in this repo is the zebrash one (below). The preset gives: `go mod tidy` on every gomod
+The shared `go` preset owns the Go rules; the only Go rules in this repo are the zebrash and gozxing ones (below). The preset gives: `go mod tidy` on every gomod
 update, indirect modules tracked (that's where zebrash's CVEs land), `golang.org/x/*` as one group, and one
 `go toolchain` PR for the golang image and go.mod's `go` directive, so CI and the image use the same Go. The `go`
 directive now actually bumps; under the fleet's `rangeStrategy: pin` it never did. Go patches automerge; a Go minor
@@ -165,6 +180,15 @@ The zebrash rule: `github.com/Gobbo89/zebrash`, plus `github.com/ingridhq/gg` an
 pulled from the abandoned upstream org), get their own group, no automerge and a `needs-review` label.
 Vulnerability-fix PRs are the exception: the shared `vulnerabilityAlerts` config automerges them and is applied with
 `force`, which a packageRule can't override.
+
+The gozxing rule: `github.com/makiuchi-d/gozxing` gets its own group, no automerge and a `needs-review` label, with
+the same vulnerability-fix exception. It's treated like zebrash because it is barely maintained: one tag (v0.1.1,
+2021), and master last changed in 2025-07. It's pinned to a master pseudo-version, because the tag lacks the
+`*image.Gray` fast path and the PR #75 race fix. Renovate would rarely see a release, so its updates
+arrive as digest PRs. gozxing decodes untrusted images in-process: read each update's diff, and check that the
+bounds tests and `FuzzBarcodeDecode` pass. `go mod tidy` alone resolves the old tag, so bump it with
+`go get github.com/makiuchi-d/gozxing@<pseudo-version>`. It pulls in `golang.org/x/xerrors`, which the preset's
+`golang.org/x/*` group covers.
 
 Advisories don't follow the fork. The Go vulnerability database, GHSA and Trivy match by module path, so a CVE filed
 against `github.com/ingridhq/zebrash` won't flag `github.com/Gobbo89/zebrash`, although most of its code is the same.

@@ -20,6 +20,7 @@ const state = {
   layout: 'auto',      // label area for pdfs and images: auto | page
   pdf: { pages: new Map(), media: null, labelsElsewhere: 0, meta: null },
   previewError: null,  // a field the last preview refused (pages, crops, layout): print waits for a good one
+  check: null,         // the shown preview's barcode check: { token, labels: Map "page:index" → result, failed }
 };
 
 // ---------------------------------------------------------------- api
@@ -78,6 +79,7 @@ const cloneBoxes = (bs) => bs.map((b) => ({ ...b, tab: b.tab ? { ...b.tab } : nu
 function clearEdits() {
   state.pdf.pages = new Map();
   state.previewSeq++;
+  stopCheck();
 }
 
 function resetPdf() {
@@ -324,6 +326,7 @@ function fillMedia(p) {
 const fmtSize = (n) => (n < 1024 ? `${n} B` : n < 1 << 20 ? `${(n / 1024).toFixed(0)} KB` : `${(n / (1 << 20)).toFixed(1)} MB`);
 
 function chooseFile(file) {
+  stopCheck();
   clearResult();
   state.file = file;
   state.kind = null;
@@ -364,6 +367,7 @@ function setMediaHint(kind) {
 async function preview() {
   if (!state.file) return;
   const seq = ++state.previewSeq;
+  stopCheck();
   const box = $('preview');
   box.classList.add('loading');
   $('pages').removeAttribute('aria-invalid');
@@ -415,6 +419,7 @@ function showPreview(r) {
   $('layout-field').hidden = !paged(r.kind);
   $('layout-whole').textContent = r.kind === 'pdf' ? 'whole page' : 'whole image';
   setMediaHint(r.kind);
+  startCheck(r.check); // before drawing, so the label lines start as "checking"
   renderPreview(r);
   updateSummary();
 }
@@ -431,6 +436,7 @@ function renderPreview(r) {
   warning.textContent = r.fitWarning || '';
   warning.hidden = !r.fitWarning;
   document.querySelector('.zpl-source')?.remove();
+  document.querySelector('.zpl-tracking')?.remove();
   $('preview').hidden = false;
   if (paged(r.kind)) {
     absorbPdf(r);
@@ -451,6 +457,7 @@ function renderPreview(r) {
       }
     }
     zplSource(!!r.previewError);
+    zplTracking(r.tracking);
   }
 }
 
@@ -804,12 +811,151 @@ function labelFigures(pg) {
       const cap = el('figcaption', { textContent: `${name} · ${pg.stale ? 'updating…' : labelNote(li, included ? TAB_ADVICE : undefined)}` });
       if (li && li.scale < SCALE_WARN) cap.classList.add('warn');
       fig.append(cap);
+      if (li) fig.append(checkLine(pg.page, k)); // hidden while stale: there's no li
       if (j === 0 && b.tab) fig.append(tabChoice(pg, b, num, li));
       figs.push(fig);
       k++;
     });
   }
   return figs;
+}
+
+// ---------------------------------------------------------------- barcode check
+//
+// A pdf or image preview comes with a check token. While that preview is on
+// screen the page long-polls /api/check/{token}, and each label gets a line
+// saying whether its barcode reads, and its tracking number. A newer
+// preview, another file or a failed preview stops it: the open poll is
+// aborted, so the server stops counting the token as polled and cancels its
+// work. A tracking number stays on the page: not in the title, storage or
+// the job name.
+
+const CHECK_GIVE_UP_MS = 30000;
+let checkAbort = null;
+
+function stopCheck() {
+  const had = !!state.check;
+  checkAbort?.abort();
+  checkAbort = null;
+  state.check = null;
+  if (had) showChecks();
+}
+
+function startCheck(token) {
+  stopCheck();
+  if (!token) return; // nothing to check, or too big to hold: no lines
+  const chk = { token, labels: new Map(), failed: false };
+  const ctrl = new AbortController();
+  state.check = chk;
+  checkAbort = ctrl;
+  pollCheck(chk, ctrl.signal);
+}
+
+// Re-polls straight away until done; gives up after CHECK_GIVE_UP_MS. A 404
+// (expired or cancelled) or a lost connection is "didn't finish", never an
+// error banner.
+async function pollCheck(chk, signal) {
+  const started = Date.now();
+  for (;;) {
+    let r;
+    try {
+      r = await api(`/api/check/${encodeURIComponent(chk.token)}`, { signal });
+    } catch {
+      if (signal.aborted) return;
+      chk.failed = true;
+      break;
+    }
+    if (signal.aborted || state.check !== chk) return;
+    if (!r) { // a 200 that isn't json: an auth proxy's login page, say
+      chk.failed = true;
+      break;
+    }
+    for (const l of r.labels || []) chk.labels.set(`${l.page}:${l.index}`, l);
+    if (r.done) break;
+    if (Date.now() - started > CHECK_GIVE_UP_MS) {
+      chk.failed = true;
+      break;
+    }
+    showChecks(); // the labels finished so far
+  }
+  if (state.check === chk) showChecks();
+}
+
+// A label's result: pending until it has one, "timeout" once the check is
+// given up; null when the preview on screen has no check.
+function checkResult(page, index) {
+  const chk = state.check;
+  if (!chk) return null;
+  const l = chk.labels.get(`${page}:${index}`);
+  if (l && l.status !== 'pending') return l;
+  return { status: chk.failed ? 'timeout' : 'pending' };
+}
+
+// the line under label image index of page, kept up to date by showChecks
+function checkLine(page, index) {
+  const p = el('p', { className: 'check-line' });
+  p.dataset.page = page;
+  p.dataset.index = index;
+  fillCheckLine(p);
+  return p;
+}
+
+function fillCheckLine(p) {
+  const l = checkResult(p.dataset.page, p.dataset.index);
+  p.className = 'check-line';
+  p.hidden = !l;
+  if (!l) {
+    p.replaceChildren();
+    return;
+  }
+  switch (l.status) {
+    case 'pending':
+      p.textContent = 'checking barcode…';
+      break;
+    case 'ok':
+      p.classList.add('ok');
+      p.replaceChildren(`${l.carrier} · `, el('span', { className: 'tracking', textContent: l.tracking }), ' · barcode reads ✓');
+      break;
+    case 'reads':
+      p.textContent = 'barcode reads, no tracking number recognised';
+      break;
+    case 'none':
+      p.classList.add('warn');
+      p.textContent = '⚠ no barcode could be read — check this label before printing';
+      break;
+    default: // timeout, error
+      p.textContent = "barcode check didn't finish";
+  }
+}
+
+// Fills in the lines in place: redrawing the pages would end a drag.
+function showChecks() {
+  for (const p of $('preview-grid').querySelectorAll('.check-line')) fillCheckLine(p);
+  updateSummary();
+}
+
+// Checked labels on pages that aren't waiting for a re-preview, whose
+// barcode couldn't be read. Labels past the preview's cap aren't checked.
+function unreadLabels() {
+  const chk = state.check;
+  if (!chk || !paged(state.kind)) return 0;
+  let n = 0;
+  for (const pg of state.pdf.pages.values()) {
+    if (pg.stale) continue;
+    for (let k = 0; k < pg.labelImages.length; k++) {
+      if (chk.labels.get(`${pg.page}:${k}`)?.status === 'none') n++;
+    }
+  }
+  return n;
+}
+
+// ZPL's tracking numbers come from its ^BC/^B3 field data, not a decode, so
+// they carry no ✓.
+function zplTracking(entries) {
+  if (!entries?.length) return;
+  const box = el('div', { className: 'zpl-tracking' }, ...entries.map((e) => el('p', { className: 'caption' },
+    `tracking · ${e.carrier} · `, el('span', { className: 'tracking', textContent: e.value }), ' (from the zpl)')));
+  $('preview-grid').after(box);
 }
 
 // the zpl itself, collapsed unless there's no picture to look at
@@ -844,9 +990,11 @@ function updateSummary() {
       : `page ${empty[0].page} has no labels — add one, reset it, or leave it out of the page range`;
     return;
   }
-  sum.textContent = copies > 1 && units > 1
+  const unread = unreadLabels();
+  sum.textContent = (copies > 1 && units > 1
     ? `${units} labels × ${copies} copies = ${total} labels`
-    : `${total} label${total === 1 ? '' : 's'}`;
+    : `${total} label${total === 1 ? '' : 's'}`) +
+    (unread ? ` · ${unread} label${unread === 1 ? '' : 's'} whose barcode couldn't be read` : '');
 }
 $('copies').addEventListener('input', () => updateSummary());
 
@@ -856,6 +1004,7 @@ $('copies').addEventListener('input', () => updateSummary());
 let previewTimer;
 function schedulePreview() {
   state.previewSeq++;
+  stopCheck();
   clearTimeout(previewTimer);
   previewTimer = setTimeout(preview, 450);
 }

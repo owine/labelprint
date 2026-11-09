@@ -130,6 +130,47 @@ If a guess is wrong, draw the box yourself or choose **whole image**.
 Only an animated GIF's first frame is printed. EXIF rotation is ignored, and photos of labels aren't supported.
 TIFF, WebP and BMP aren't accepted.
 
+## Barcode check
+
+For a PDF or an image, the preview checks each label's barcode in the exact black-and-white image LPrint will get.
+Each label gets a line under it:
+
+- **UPS · 1Z… · barcode reads ✓**: a barcode decodes, and its value has a carrier's tracking-number format.
+- **barcode reads, no tracking number recognised**: a barcode decodes, but no value is a tracking number. It might
+  be a reference number, a postal routing barcode, or the QR code on a return label.
+- **⚠ no barcode could be read — check this label before printing**: nothing decodes. This is the one to look at:
+  a label shrunk too far to fit, a box edited across the barcode, or a doc tab included on 4×6 stock.
+- **barcode check didn't finish**: the check timed out or was dropped.
+
+It's a hint: printing is never blocked, whatever it says. The summary beside **print** counts the labels whose
+barcode couldn't be read.
+
+**What's checked.** Code 128 (GS1-128 included) and Code 39 barcodes, and QR codes, which count as "reads".
+MaxiCode, DataMatrix and PDF417 aren't checked. Tracking numbers are recognised by their format only, without check
+digits:
+
+- UPS `1Z…`;
+- USPS IMpb: `92`–`95` and 22 or 26 digits, alone or after a `420` ZIP;
+- FedEx Ground: `96…`, shown as its last 15 or 12 digits;
+- FedEx Express: 34 digits, shown as the last 12.
+
+The FedEx lengths and the slices shown come from third-party descriptions of the formats. They haven't been checked
+against a FedEx-published specification, so treat a FedEx line as a best guess.
+
+USPS's legacy formats (`91…`, 20 digits) aren't recognised. Nor are plain 12- or 15-digit numbers: they look just
+like the reference numbers most labels carry.
+
+**How it runs.** The check runs in the container with [gozxing](https://github.com/makiuchi-d/gozxing). It starts
+when the page shows the preview and works through the labels one at a time in the background, at most 2 s each. It
+covers the labels the preview shows, up to 12. Tracking numbers stay in the page: they aren't logged, kept in the
+browser or put in the job name, and the server holds them in memory for at most 10 minutes. The page collects them
+from `/api/check/<token>`, so a reverse proxy's access log records those tokens, as it does share tokens. That's
+harmless behind your auth proxy, with a 10-minute lifetime.
+
+**ZPL** isn't decoded: the printer draws its barcodes itself. Instead, the preview reads the tracking number from
+the ZPL's own `^BC` (Code 128) and `^B3` (Code 39) fields and shows "tracking · UPS · 1Z… (from the zpl)", with no
+✓. Fields written with `^FH` hex escapes or `^FN` templates are skipped.
+
 ## Feeding, test label and calibrating
 
 **Feed a label** in the header feeds one blank label. It's sent as an ordinary ZPL job through LPrint, so it shows up
@@ -327,7 +368,8 @@ MIT, see [LICENSE](LICENSE). The bundled web fonts are under the SIL Open Font L
 ([`OFL-geist.txt`](web/fonts/OFL-geist.txt), [`OFL-geistmono.txt`](web/fonts/OFL-geistmono.txt)) and Instrument
 Serif ([`OFL-instrumentserif.txt`](web/fonts/OFL-instrumentserif.txt)). ZPL previews use
 [zebrash](https://github.com/Gobbo89/zebrash) (MIT), the maintained fork of
-[ingridhq/zebrash](https://github.com/ingridhq/zebrash).
+[ingridhq/zebrash](https://github.com/ingridhq/zebrash). The barcode check uses
+[gozxing](https://github.com/makiuchi-d/gozxing) (MIT), a Go port of ZXing.
 
 The labelprint binary and container images are based in part on the work of the FreeType Team: zebrash draws text
 with [golang/freetype](https://github.com/golang/freetype), a Go port of [FreeType](https://www.freetype.org), used
