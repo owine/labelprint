@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Keeps one issue, labelled apk-pin-satisfied, in step with docker-build's
-# "Flag apk pins the base image already satisfies" check on main: open while
+# Keeps one issue, labelled apk-pin-satisfied, in step with the CI check
+# "Flag apk pins the base image already satisfies" on main: open while
 # any Dockerfile apk pin is something the base image already ships, updated
 # when that list changes, closed once it's empty. The warnings alone land in
 # Renovate base-bump PRs that automerge, where nobody reads them.
@@ -68,9 +68,9 @@ body=$(printf '%s\n' \
   "$list" \
   "$marker" \
   "" \
-  "**What to do:** drop each pin, and its comment, from the runtime \`apk add\` in the \`Dockerfile\` (CLAUDE.md," \
-  "Dependency management, the paragraph on pinning a package that's already in the base image). The Renovate PR that" \
-  "bumps the base is the natural place." \
+  "**What to do:** drop each pin, and its comment, from the runtime \`apk add\` in the \`Dockerfile\`;" \
+  "CLAUDE.md's note on pinning a package that's already in the base image explains why. The" \
+  "Renovate PR that bumps the base is the natural place." \
   "" \
   "Found at $sha in $run_url." \
   "" \
