@@ -154,7 +154,7 @@ func newTestServerS(t *testing.T, mutate ...func(*config)) (*fakeLPrint, *server
 	}
 	log := slog.New(slog.DiscardHandler)
 	s := &server{cfg: cfg, ipp: ipp, pdf: newPDFRenderer(cfg.DPI, log), zpl: newZPLRenderer(cfg.DPI),
-		shares: newShareStore(cfg.MaxUpload), log: log}
+		shares: newShareStore(cfg.MaxUpload), checks: newCheckStore(log), log: log, baseCtx: t.Context()}
 	return fake, s
 }
 

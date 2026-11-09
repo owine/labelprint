@@ -31,8 +31,11 @@ type server struct {
 	pdf     *pdfRenderer
 	zpl     *zplRenderer
 	shares  *shareStore
+	checks  *checkStore
 	log     *slog.Logger
 	printMu sync.Mutex // one submission at a time, so multi-page jobs don't interleave
+	// baseCtx ends at shutdown; every barcode check's context derives from it.
+	baseCtx context.Context
 }
 
 func (s *server) routes() http.Handler {
@@ -48,6 +51,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("POST /api/printer/maintenance", s.handleMaintenance)
 	mux.HandleFunc("POST /share", s.handleShare)
 	mux.HandleFunc("GET /api/share/{token}", s.handleSharedFile)
+	mux.HandleFunc("GET /api/check/{token}", s.handleCheck)
 	mux.Handle("GET /labelprint.shortcut", shortcutHandler(static))
 
 	// An auth proxy's session cookie rides along on any request to this host,
@@ -326,6 +330,10 @@ type previewResponse struct {
 	// png, jpeg and gif: the image's pixels and the ppi it's sized by. The
 	// rest of the reply is a one-page pdf's.
 	Image *imageInfo `json:"image,omitempty"`
+	// pdf and images: the token to poll at /api/check/{token} for the label
+	// images' barcode check. Absent when there's nothing to check or the
+	// labels are too big to hold.
+	Check string `json:"check,omitempty"`
 }
 
 func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
@@ -356,9 +364,14 @@ func (s *server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		resp.WidthIn, resp.HeightIn = p.Size.WidthIn, p.Size.HeightIn
 		resp.Pages = dataURLs(p.Pages)
 	case kindPDF, kindPNG, kindJPEG, kindGIF:
-		if err := s.previewPDF(r.Context(), up, &resp); err != nil {
+		labels, err := s.previewPDF(r.Context(), up, &resp)
+		if err != nil {
 			s.fail(w, err)
 			return
+		}
+		// only once the preview has worked: an error path holds nothing
+		if tok, ok := s.checks.put(s.baseCtx, labels); ok {
+			resp.Check = tok
 		}
 		if im := resp.Image; im != nil {
 			s.log.Info("preview", "kind", up.Kind, "bytes", len(up.Data), "ppi", im.PPI, "ppi_source", im.PPISource,
@@ -452,27 +465,29 @@ func (s *server) openPDF(ctx context.Context, src docSource) (*pdfDoc, []int, *i
 // previewPDF fills in a pdf's (or a wrapped image's) pages, their label
 // boxes and, for the first maxPreviewLabels boxes, the label images exactly
 // as they'd be sent. Detection runs on every selected page so labels is the
-// full count; pages and label images are capped.
-func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewResponse) (err error) {
+// full count; pages and label images are capped. It returns those label
+// images' PNGs, keyed by page and index into that page's labelImages, for
+// the barcode check.
+func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewResponse) (checks []checkInput, err error) {
 	ctx, cancel := context.WithTimeout(ctx, s.pdf.deadline)
 	defer cancel()
 	defer func() { err = tookTooLong(ctx, err, up.Kind) }() // deferred after cancel, so it runs first
 
 	release, err := s.pdf.acquire(ctx) // held for every poppler call, pdfinfo included, and an image's decode
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer release()
 	media, mediaOK := s.mediaFor(up.Fields["media"])
 	doc, pages, info, err := s.openPDF(ctx, docSource{up: up, media: media, mediaOK: mediaOK})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer doc.Close()
 	resp.Image = info
 	o, err := s.labelOpts(up.Fields, doc, pages, up.Fields["media"])
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	resp.PageCount, resp.Selected = doc.Pages, len(pages)
@@ -481,7 +496,7 @@ func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewRespon
 	}
 	plans, err := doc.plan(ctx, pages, o)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	for _, pl := range plans {
 		if !pl.Skip {
@@ -495,7 +510,7 @@ func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewRespon
 	}
 	images, err := doc.renderPages(ctx, shownPages, previewDPI, true)
 	if err != nil {
-		return &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
+		return nil, &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
 	}
 	budget := maxPreviewLabels
 	for _, pl := range shown {
@@ -508,8 +523,9 @@ func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewRespon
 			}
 			l, err := doc.label(ctx, pl.Page, b, o)
 			if err != nil {
-				return &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
+				return nil, &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
 			}
+			checks = append(checks, checkInput{Page: pl.Page, Index: len(pp.LabelImages), PNG: l.PNG})
 			pp.LabelImages = append(pp.LabelImages, previewLabel{Image: dataURL(l.PNG), Method: l.Method,
 				PPI: int(math.Round(l.PPI)), Scale: round2(l.Scale)})
 			budget--
@@ -521,14 +537,14 @@ func (s *server) previewPDF(ctx context.Context, up *upload, resp *previewRespon
 				inc := b.round4().union(pl.Tabs[i].round4()).round4()
 				sc, err := doc.labelScale(ctx, pl.Page, inc, o.canvas)
 				if err != nil {
-					return &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
+					return nil, &userError{Status: http.StatusUnprocessableEntity, Msg: err.Error()}
 				}
 				pp.TabScales[i] = round2(sc)
 			}
 		}
 		resp.Pages = append(resp.Pages, pp)
 	}
-	return nil
+	return checks, nil
 }
 
 func pdfJobName(file string, page, pages, i, n int) string {
@@ -540,6 +556,19 @@ func pdfJobName(file string, page, pages, i, n int) string {
 		name += fmt.Sprintf(" · label %d/%d", i+1, n)
 	}
 	return name
+}
+
+// handleCheck is the barcode check's long poll: it answers when every label
+// is done or after 8 s, whichever is first, always 200 with done and the
+// labels so far (the page reads done; api() doesn't expose the status). A
+// token that's unknown, expired or cancelled is a 404.
+func (s *server) handleCheck(w http.ResponseWriter, r *http.Request) {
+	reply, ok := s.checks.poll(r.Context(), r.PathValue("token"))
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "that barcode check has expired"})
+		return
+	}
+	writeJSON(w, http.StatusOK, reply)
 }
 
 // ---------------------------------------------------------------- print
