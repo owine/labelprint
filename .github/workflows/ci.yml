@@ -79,11 +79,12 @@ jobs:
       # for hours, and every apt-dependent job in the fleet died at
       # `apt-get update`. This speed-tests the runner's current mirror against
       # random ones from mirrors.ubuntu.com and switches only if another wins,
-      # and sets APT::Acquire::Retries "3". continue-on-error is load-bearing:
-      # the action runs its own `sudo apt-get update` (lists older than 60 min,
-      # always true on a fresh runner) outside its `|| exit 0` guard, so with
-      # no mirror reachable that call fails the step. The update in "Install
-      # poppler" stays: it is the only refresh when this step fails or times out.
+      # and sets APT::Acquire::Retries "3". It needs mirrors.ubuntu.com, so it
+      # can't help when every *.ubuntu.com name fails (as it did that day); it
+      # then keeps the current mirror and skips its own update. continue-on-error
+      # is load-bearing: without it, hitting timeout-minutes or one of the
+      # action's own `exit 1` paths would fail the job. The update in "Install
+      # poppler" stays: it is the only refresh when this step bails out early.
       - name: Pick a reachable apt mirror
         timeout-minutes: 3
         continue-on-error: true
