@@ -75,6 +75,21 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # On 2026-11-11 the runners could not resolve azure.archive.ubuntu.com
+      # for hours, and every apt-dependent job in the fleet died at
+      # `apt-get update`. This speed-tests the runner's current mirror against
+      # random ones from mirrors.ubuntu.com and switches only if another wins,
+      # and sets APT::Acquire::Retries "3". It needs mirrors.ubuntu.com, so it
+      # can't help when every *.ubuntu.com name fails (as it did that day); it
+      # then keeps the current mirror and skips its own update. continue-on-error
+      # is load-bearing: without it, hitting timeout-minutes or one of the
+      # action's own `exit 1` paths would fail the job. The update in "Install
+      # poppler" stays: it is the only refresh when this step bails out early.
+      - name: Pick a reachable apt mirror
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: vegardit/fast-apt-mirror.sh@806c59276adfff2df420124ad5e4587f018c358a  # 1.4.5
+
       # The PDF tests shell out to poppler; requirePoppler fails (not skips) when CI is set.
       - name: Install poppler (the PDF tests need pdfinfo, pdftoppm, pdfimages, pdftohtml)
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends poppler-utils
