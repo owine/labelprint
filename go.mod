@@ -1,6 +1,6 @@
 module github.com/owine/labelprint
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/Gobbo89/zebrash v1.41.1
